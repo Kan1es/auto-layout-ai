@@ -1,0 +1,21 @@
+{
+  "service_name": "auto-layout-ai",
+  "version": "0.1.0",
+  "workspace": {
+    "root": "workspace"
+  },
+  "dart": {
+    "repository": "https://github.com/chen-xin-94/DART",
+    "weights_path": "models/dart/groundingdino",
+    "default_mode": "bbox"
+  },
+  "cvat": {
+    "url": "http://localhost:8080",
+    "manual_import": true
+  },
+  "dataset_limits": {
+    "max_zip_mb": 512,
+    "max_images": 150,
+    "supported_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
+  }
+}

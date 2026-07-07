@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Local config
+config/app.local.json
+.env
+.env.*
+
+# Local datasets and generated outputs
+workspace/*
+!workspace/.gitkeep
+
+# Model weights and large local artifacts
+models/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.ckpt
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Frontend caches/build outputs for future React/Vite work
+node_modules/
+dist/
+build/
+.vite/
