@@ -1,0 +1,47 @@
+from pydantic import BaseModel, Field
+from typing import Literal
+from datetime import datetime
+
+class Parameters(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
+
+class AnnotationObj(BaseModel):
+    label: str
+    confidence: float
+    bbox: Parameters | None
+    mask: dict | list | None
+
+class Dataset(BaseModel):
+    id: str
+    name: str
+    status: Literal[
+        "PROCESSING",
+        "READY",
+        "FAILED"
+    ]
+    image_count: int
+    created_at: datetime = Field(default_factory=datetime.now)
+    warnings: list[str]
+
+class ImageItem(BaseModel):
+    id: str
+    filename: str
+    path: str
+    width: int
+    height: int
+    approved: bool
+    viewed: bool
+
+class DartSettings(BaseModel):
+    prompt: str
+    confidence: float
+    mode: Literal["bbox", "mask", "bbox_and_mask"]
+    show_overlay: bool
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+class Annotation(BaseModel):
+    image_id: str
+    objects: list[AnnotationObj]
