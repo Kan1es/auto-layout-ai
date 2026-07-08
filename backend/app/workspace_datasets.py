@@ -35,6 +35,9 @@ class DatasetWorkspace:
         )
         self.errors_path = self.results_dir / "errors.json"
 
+        self.upload_dir = self.dataset_dir / "upload"
+        self.original_zip_path = self.upload_dir / "original.zip"
+
     def create(self):
         self.image_dir.mkdir(
             parents=True,
@@ -48,6 +51,11 @@ class DatasetWorkspace:
 
         self.previews_dir.mkdir(
             parents=True,
+            exist_ok=True
+        )
+        
+        self.upload_dir.mkdir(
+            parents=True, 
             exist_ok=True
         )
 

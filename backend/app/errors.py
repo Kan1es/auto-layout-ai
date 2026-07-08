@@ -21,3 +21,6 @@ class JsonWriteError(StorageError):
     def __init__(self, path, error):
         super().__init__(f"Не удалось сохранить json {path}, ошибка - {error}")
         self.path = path
+
+class DatasetImportError(RuntimeError):
+    pass

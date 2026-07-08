@@ -14,6 +14,15 @@ class AnnotationObj(BaseModel):
     bbox: Parameters | None
     mask: dict | list | None
 
+class ImageItem(BaseModel):
+    id: str
+    filename: str
+    path: str
+    width: int
+    height: int
+    approved: bool
+    viewed: bool
+
 class Dataset(BaseModel):
     id: str
     name: str
@@ -23,17 +32,10 @@ class Dataset(BaseModel):
         "FAILED"
     ]
     image_count: int
+    images: list[ImageItem]
     created_at: datetime = Field(default_factory=datetime.now)
-    warnings: list[str]
+    warnings: list[str] = Field(default_factory=list)
 
-class ImageItem(BaseModel):
-    id: str
-    filename: str
-    path: str
-    width: int
-    height: int
-    approved: bool
-    viewed: bool
 
 class DartSettings(BaseModel):
     prompt: str
