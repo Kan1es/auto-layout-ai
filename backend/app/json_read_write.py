@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .errors import (
     JsonFormatError,
-    JsonNotFountError,
+    JsonNotFoundError,
     JsonReadError,
     JsonWriteError,
 )
@@ -13,7 +13,7 @@ def read_json(path):
     path = Path(path)
 
     if not path.exists():
-        raise JsonNotFountError(path)
+        raise JsonNotFoundError(path)
 
     try:
         with path.open("r", encoding="utf-8") as file:
