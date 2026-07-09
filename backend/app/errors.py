@@ -1,7 +1,7 @@
 class StorageError(RuntimeError):
     pass
 
-class JsonNotFountError(StorageError):
+class JsonNotFoundError(StorageError):
     def __init__(self, path):
         super().__init__(f"json-файл не найден: {path}")
         self.path = path
