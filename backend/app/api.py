@@ -3,6 +3,7 @@ from datetime import datetime
 from uuid import uuid4
 from fastapi import APIRouter, HTTPException, UploadFile, File
 
+from .image_stats import calculate_dataset_stats
 from .json_read_write import read_json, write_json
 
 def create_api_router(workspace_root):
@@ -23,6 +24,28 @@ def create_api_router(workspace_root):
                 }
             )
         return read_json(path)
+
+    def save_metadata(dataset_id, metadata):
+        write_json(dataset_dir(dataset_id) / "metadata.json", metadata)
+
+    def build_dataset_stats(dataset_id):
+        metadata = load_metadata(dataset_id)
+        stats = calculate_dataset_stats(dataset_id, dataset_dir(dataset_id))
+        metadata["stats"] = {
+            "image_count": stats["image_count"],
+            "readable_image_count": stats["readable_image_count"],
+            "unreadable_image_count": stats["unreadable_image_count"],
+            "extensions": stats["extensions"],
+            "min_size": stats["min_size"],
+            "max_size": stats["max_size"],
+            "common_resolutions": stats["common_resolutions"],
+            "warnings_count": stats["warnings_count"],
+        }
+        metadata["images"] = stats["images"]
+        metadata["image_count"] = stats["image_count"]
+        metadata["warnings"] = stats["warnings"]
+        save_metadata(dataset_id, metadata)
+        return stats
 
     @router.post("/datasets/upload", status_code=201)
     async def upload_dataset(file: UploadFile = File(...)):
@@ -64,6 +87,8 @@ def create_api_router(workspace_root):
             "images": [],
             "stats": {
                 "image_count": 0,
+                "readable_image_count": 0,
+                "unreadable_image_count": 0,
                 "extensions": {},
                 "min_size": None,
                 "max_size": None,
@@ -102,11 +127,21 @@ def create_api_router(workspace_root):
 
     @router.get("/datasets/{dataset_id}/stats")
     def get_stats(dataset_id):
-        metadata = load_metadata(dataset_id)
+        stats = build_dataset_stats(dataset_id)
         return {
             "dataset_id": dataset_id,
-            "stats": metadata.get("stats", {}),
-            "warnings": metadata.get("warnings", [])
+            "stats": {
+                "image_count": stats["image_count"],
+                "readable_image_count": stats["readable_image_count"],
+                "unreadable_image_count": stats["unreadable_image_count"],
+                "extensions": stats["extensions"],
+                "min_size": stats["min_size"],
+                "max_size": stats["max_size"],
+                "common_resolutions": stats["common_resolutions"],
+                "warnings_count": stats["warnings_count"],
+            },
+            "warnings": stats["warnings"],
+            "images": stats["images"],
         }
 
     def to_workspace_url(path):
