@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -19,6 +20,18 @@ static_dir = frontend_dir / "static"
 
 workspace_root = Path(config.workspace.root)
 workspace_root.mkdir(parents=True, exist_ok=True)
+logs_dir = workspace_root / "logs"
+logs_dir.mkdir(parents=True, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(logs_dir / "backend.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 # frontend сможет теперь жить отдельно?
 app.add_middleware(
@@ -74,6 +87,20 @@ async def validation_error_handler(_request: Request, exc: RequestValidationErro
         {"errors": exc.errors()}
     )
 
+@app.exception_handler(Exception)
+async def unexpected_error_handler(request: Request, exc: Exception):
+    logger.exception(
+        "Unhandled backend error on %s %s",
+        request.method,
+        request.url.path,
+    )
+    return error_response(
+        500,
+        "INTERNAL_SERVER_ERROR",
+        "Unexpected backend error. See backend logs for details.",
+        None
+    )
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(frontend_dir / "index.html")
@@ -96,3 +123,4 @@ def healthcheck() -> dict[str, object]:
 @app.on_event("startup")
 def ensure_workspace() -> None:
     Path(config.workspace.root).mkdir(parents=True, exist_ok=True)
+    (Path(config.workspace.root) / "logs").mkdir(parents=True, exist_ok=True)

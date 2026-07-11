@@ -134,6 +134,59 @@ class ImageStatsTest(unittest.TestCase):
         self.assertEqual(metadata["stats"]["image_count"], 1)
         self.assertEqual(metadata["images"][0]["height"], 768)
 
+    @unittest.skipIf(
+        importlib.util.find_spec("multipart") is None,
+        "python-multipart is required to register upload routes",
+    )
+    def test_stats_api_saves_unreadable_image_error_in_results(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_root = Path(temp_dir) / "workspace"
+            dataset_root = workspace_root / "datasets" / "sample"
+            images_dir = dataset_root / "images"
+            results_dir = dataset_root / "results"
+            images_dir.mkdir(parents=True)
+            results_dir.mkdir(parents=True)
+            (images_dir / "broken.jpg").write_bytes(b"not a jpeg")
+            (dataset_root / "metadata.json").write_text(
+                json.dumps({
+                    "id": "sample",
+                    "name": "sample",
+                    "status": "UPLOADED",
+                    "image_count": 0,
+                    "warnings": [],
+                    "images": [],
+                    "stats": {},
+                }),
+                encoding="utf-8",
+            )
+            (results_dir / "errors.json").write_text(
+                json.dumps({"errors": []}),
+                encoding="utf-8",
+            )
+
+            app = FastAPI()
+            app.include_router(create_api_router(workspace_root))
+            client = TestClient(app)
+            stats_response = client.get("/api/datasets/sample/stats")
+            results_response = client.get("/api/datasets/sample/results")
+
+            errors_file = json.loads(
+                (results_dir / "errors.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(stats_response.status_code, 200)
+        self.assertEqual(results_response.status_code, 200)
+        self.assertEqual(len(errors_file["errors"]), 1)
+        self.assertEqual(errors_file["errors"][0]["stage"], "dataset_stats")
+        self.assertEqual(errors_file["errors"][0]["image_id"], "broken")
+        self.assertEqual(errors_file["errors"][0]["filename"], "broken.jpg")
+        self.assertEqual(
+            errors_file["errors"][0]["details"]["reason"],
+            "invalid JPEG header",
+        )
+        self.assertIn("created_at", errors_file["errors"][0])
+        self.assertEqual(results_response.json()["errors"], errors_file["errors"])
+
 
 if __name__ == "__main__":
     unittest.main()

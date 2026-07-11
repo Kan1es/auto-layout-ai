@@ -161,7 +161,8 @@ def calculate_dataset_stats(dataset_id: str, dataset_root: Path) -> dict:
             try:
                 width, height = read_image_size(path)
             except (OSError, ImageSizeError, struct.error) as error:
-                warnings.append(f"{relative_path}: {error}")
+                message = str(error)
+                warnings.append(f"{relative_path}: {message}")
                 images.append({
                     "id": image_id,
                     "filename": path.name,
@@ -169,6 +170,7 @@ def calculate_dataset_stats(dataset_id: str, dataset_root: Path) -> dict:
                     "width": None,
                     "height": None,
                     "readable": False,
+                    "error": message,
                 })
                 continue
 
