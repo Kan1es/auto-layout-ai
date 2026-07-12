@@ -175,9 +175,20 @@ class ImageStatsTest(unittest.TestCase):
                 json.dumps({"errors": []}),
                 encoding="utf-8",
             )
-
+            dataset_limits = DatasetLimits(
+                max_zip_mb=10,
+                max_extracted_mb=20,
+                max_images=100,
+                supported_extensions=(
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".bmp",
+                    ".webp",
+                ),
+            )
             app = FastAPI()
-            app.include_router(create_api_router(workspace_root))
+            app.include_router(create_api_router(workspace_root, dataset_limits))
             client = TestClient(app)
             stats_response = client.get("/api/datasets/sample/stats")
             results_response = client.get("/api/datasets/sample/results")
