@@ -10,7 +10,13 @@ from .dataset_zip_importer import import_dataset_zip
 from .errors import DatasetImportError
 from .image_stats import calculate_dataset_stats
 from .json_read_write import read_json, write_json
-from .models import DatasetError
+from .models import (
+    DatasetError,
+    RepresentativeImageResponse,
+    RepresentativeInitRequest,
+    RepresentativeState,
+    RepresentativeStateResponse,
+)
 from .workspace_datasets import DatasetWorkspace
 
 

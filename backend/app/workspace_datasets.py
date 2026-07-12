@@ -1,11 +1,14 @@
 from pathlib import Path
+
 from .json_read_write import read_json, write_json
 
 from .models import (
     Annotation,
     DartSettings,
-    Dataset
+    Dataset,
+    RepresentativeState
 )
+
 
 class DatasetWorkspace:
     def __init__(self, root, id):
@@ -38,6 +41,8 @@ class DatasetWorkspace:
         self.upload_dir = self.dataset_dir / "upload"
         self.original_zip_path = self.upload_dir / "original.zip"
 
+        self.representative_path = self.dataset_dir / "representative.json"
+
     def create(self):
         self.image_dir.mkdir(
             parents=True,
@@ -53,9 +58,9 @@ class DatasetWorkspace:
             parents=True,
             exist_ok=True
         )
-        
+
         self.upload_dir.mkdir(
-            parents=True, 
+            parents=True,
             exist_ok=True
         )
 
@@ -137,3 +142,12 @@ class DatasetWorkspace:
     def load_raw_result(self, image_id):
         path = self.raw_dir / f"{image_id}.json"
         return read_json(path)
+
+    def save_representative_state(self, state: RepresentativeState) -> None:
+        if not isinstance(state, RepresentativeState):
+            raise TypeError("Expected RepresentativeState")
+        write_json(self.representative_path, state)
+
+    def load_representative_state(self):
+        data = read_json(self.representative_path)
+        return RepresentativeState.model_validate(data)
