@@ -52,7 +52,7 @@ app.add_middleware(
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 app.mount("/workspace", StaticFiles(directory=workspace_root), name="workspace")
-app.include_router(create_api_router(workspace_root))
+app.include_router(create_api_router(workspace_root, config.dataset_limits))
 
 def error_response(status_code, code, message, details = None):
     return JSONResponse(

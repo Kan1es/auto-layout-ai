@@ -32,6 +32,7 @@ class CvatConfig:
 @dataclass(frozen=True)
 class DatasetLimits:
     max_zip_mb: int
+    max_extracted_mb: int
     max_images: int
     supported_extensions: tuple[str, ...]
 
@@ -78,6 +79,7 @@ def load_config() -> AppConfig:
         ),
         dataset_limits=DatasetLimits(
             max_zip_mb=int(raw["dataset_limits"]["max_zip_mb"]),
+            max_extracted_mb=int(raw["dataset_limits"]["max_extracted_mb"]),
             max_images=int(raw["dataset_limits"]["max_images"]),
             supported_extensions=tuple(raw["dataset_limits"]["supported_extensions"]),
         ),

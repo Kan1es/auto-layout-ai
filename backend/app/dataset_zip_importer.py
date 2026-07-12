@@ -1,34 +1,46 @@
-from .errors import DatasetImportError
-import zipfile
-from .config import DatasetLimits
-from pathlib import Path, PurePosixPath
-from .workspace_datasets import DatasetWorkspace
 import shutil
+import zipfile
+from pathlib import Path, PurePosixPath
+
+from .config import DatasetLimits
+from .errors import DatasetImportError
 from .models import Dataset, ImageItem
+from .workspace_datasets import DatasetWorkspace
+
 
 def is_safe_zip_member(name: str) -> bool:
-    if ('\\' in name):
+    if "\\" in name:
         return False
-    
+
     path = PurePosixPath(name)
 
     if path.is_absolute():
         return False
-    
+
     if '..' in path.parts:
         return False
-    
+
     return True
 
-def import_dataset_zip(zip_path: Path, dataset_id: str, dataset_name: str, workspace_root: Path, limits: DatasetLimits):
+
+def import_dataset_zip(
+    zip_path: Path,
+    dataset_id: str,
+    dataset_name: str,
+    workspace_root: Path,
+    limits: DatasetLimits,
+):
     max_size_bytes = limits.max_zip_mb * 1024 * 1024
+
+    max_extracted_size_bytes = limits.max_extracted_mb * 1024 * 1024
+
 
     if zip_path.suffix.lower() != ".zip":
         raise DatasetImportError("Поддерживаются только .zip архивы")
-    
+
     if zip_path.stat().st_size > max_size_bytes:
         raise DatasetImportError("ZIP-архив слишком большой")
-    
+
     try:
         with zipfile.ZipFile(zip_path) as archive:
             image_members = []
@@ -42,11 +54,11 @@ def import_dataset_zip(zip_path: Path, dataset_id: str, dataset_name: str, works
                     raise DatasetImportError(
                         f"ZIP содержит небезопасный путь: {member.filename}"
                     )
-                
+
                 member_path = PurePosixPath(member.filename)
 
                 if (
-                    "__MACOSX" in member_path.parts 
+                    "__MACOSX" in member_path.parts
                     or member_path.name.startswith("._")
                     or member_path.name == ".DS_Store"
                 ):
@@ -62,10 +74,19 @@ def import_dataset_zip(zip_path: Path, dataset_id: str, dataset_name: str, works
 
             if not image_members:
                 raise DatasetImportError("ZIP не содержит поддерживаемых изображений")
-            
+
             if len(image_members) > limits.max_images:
                 raise DatasetImportError("В ZIP-архиве слишком много файлов")
-            
+
+            total_extracted_size = sum(
+                member.file_size
+                for member in image_members
+            )
+            if total_extracted_size > max_extracted_size_bytes:
+                raise DatasetImportError(
+                    "Распакованный размер изображений превышает допустимый лимит"
+                )
+
             workspace = DatasetWorkspace(workspace_root, dataset_id)
             workspace.create()
 
@@ -111,5 +132,5 @@ def import_dataset_zip(zip_path: Path, dataset_id: str, dataset_name: str, works
 
 
 
-    
+
 

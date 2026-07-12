@@ -32,7 +32,7 @@ class DatasetWorkspace:
                 self.dataset_dir / "dart_settings.json"
         )
         self.annotations_path = (
-                self.results_dir / "annotations.json"
+                self.results_dir / "annotations_internal.json"
         )
         self.errors_path = self.results_dir / "errors.json"
 

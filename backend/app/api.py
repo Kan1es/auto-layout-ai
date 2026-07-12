@@ -1,17 +1,23 @@
-from pathlib import Path
 from datetime import datetime
 import logging
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
-from fastapi import APIRouter, HTTPException, UploadFile, File
 
+from fastapi import APIRouter, File, HTTPException, UploadFile
+
+from .dataset_zip_importer import import_dataset_zip
+from .errors import DatasetImportError
 from .image_stats import calculate_dataset_stats
 from .json_read_write import read_json, write_json
 from .models import DatasetError
+from .workspace_datasets import DatasetWorkspace
+
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-def create_api_router(workspace_root):
+def create_api_router(workspace_root, dataset_limits):
     router = APIRouter(prefix="/api")
 
     def dataset_dir(dataset_id):
@@ -115,55 +121,71 @@ def create_api_router(workspace_root):
                 detail={
                     "code": "INVALID_UPLOAD_TYPE",
                     "message": "Only .zip archives are supported.",
-                    "details": {"filename": file.filename}
-                }
+                    "details": {"filename": file.filename},
+                },
             )
 
         dataset_id = f"ds_{uuid4().hex[:12]}"
-        root = dataset_dir(dataset_id)
+        dataset_name = Path(file.filename).stem
+        max_size_bytes = dataset_limits.max_zip_mb * 1024 * 1024
+        chunk_size = 1024 * 1024
+        uploaded_size = 0
 
-        upload_dir = root / "upload"
-        images_dir = root / "images"
-        results_dir = root / "results"
-        raw_dir = results_dir / "raw"
-        previews_dir = results_dir / "previews"
-        cvat_dir = root / "cvat_export"
+        with TemporaryDirectory() as temp_dir:
+            temp_zip_path = Path(temp_dir) / "upload.zip"
 
-        for path in [upload_dir, images_dir, raw_dir, previews_dir, cvat_dir]:
-            path.mkdir(parents=True, exist_ok=True)
+            with temp_zip_path.open("wb") as target:
+                while True:
+                    chunk = await file.read(chunk_size)
 
-        archive_path = upload_dir / "original.zip"
-        archive_path.write_bytes(await file.read())
+                    if not chunk:
+                        break
 
-        metadata = {
-            "id": dataset_id,
-            "name": Path(file.filename).stem,
-            "status": "UPLOADED",
-            "image_count": 0,
-            "created_at": datetime.utcnow().isoformat(),
-            "warnings": [
-                "ZIP extraction is not implemented in this API MVP yet."
-            ],
-            "images": [],
-            "stats": {
-                "image_count": 0,
-                "readable_image_count": 0,
-                "unreadable_image_count": 0,
-                "extensions": {},
-                "min_size": None,
-                "max_size": None,
-                "common_resolutions": [],
-                "warnings_count": 1
-            }
-        }
+                    uploaded_size += len(chunk)
 
-        write_json(root / "metadata.json", metadata)
-        write_json(results_dir / "annotations_internal.json", {"annotations": []})
-        write_json(results_dir / "errors.json", {"errors": []})
+                    if uploaded_size > max_size_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail={
+                                "code": "DATASET_ARCHIVE_TOO_LARGE",
+                                "message": "ZIP archive is too large.",
+                                "details": {
+                                    "max_zip_mb": dataset_limits.max_zip_mb,
+                                },
+                            },
+                        )
+
+                    target.write(chunk)
+            try:
+                dataset = import_dataset_zip(
+                    zip_path=temp_zip_path,
+                    dataset_id=dataset_id,
+                    dataset_name=dataset_name,
+                    workspace_root=workspace_root,
+                    limits=dataset_limits,
+                )
+            except DatasetImportError as error:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "DATASET_IMPORT_FAILED",
+                        "message": str(error),
+                        "details": {
+                            "filename": file.filename,
+                        },
+                    },
+                ) from error
+
+        workspace = DatasetWorkspace(
+            workspace_root,
+            dataset_id,
+        )
+        workspace.save_annotations([])
+        workspace.save_errors([])
 
         return {
             "status": "OK",
-            "dataset": metadata,
+            "dataset": dataset.model_dump(mode="json"),
             "links": {
                 "dataset": f"/api/datasets/{dataset_id}",
                 "images": f"/api/datasets/{dataset_id}/images",

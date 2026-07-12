@@ -18,10 +18,11 @@ class ImageItem(BaseModel):
     id: str
     filename: str
     path: str
-    width: int
-    height: int
-    approved: bool
-    viewed: bool
+    width: int | None
+    height: int | None
+    approved: bool = False
+    viewed: bool = False
+    readable: bool = True
 
 class Dataset(BaseModel):
     id: str
@@ -47,6 +48,7 @@ class DartSettings(BaseModel):
 class Annotation(BaseModel):
     image_id: str
     objects: list[AnnotationObj]
+
 
 class DatasetError(BaseModel):
     stage: str
