@@ -74,3 +74,66 @@ Expected healthcheck response:
 - `workspace/` is for local datasets and generated results and is ignored by git.
 - `models/` is for local DART weights and is ignored by git.
 - Preview images are only for visual review. CVAT export must use original images and real annotations.
+
+
+--------------------------------------------------------
+DART(проверка работы на локальной машине) - входные данные:
+- путь к входному изображению;
+- подсказка;
+- уверенность;
+- режим;
+- Путь к конфигурации GroundingDINO;
+- путь к контрольной точке GroundingDINO.
+
+Пример:
+Example:
+
+```powershell
+python scripts/dart_single_image.py `
+  --image-path "samples/test.jpg" `
+  --prompt "bolt" `
+  --confidence 0.35 `
+  --mode bbox `
+  --config-path "D:/DART/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py" `
+  --checkpoint-path "D:/models/dart/groundingdino/groundingdino_swint_ogc.pth" `
+  --output-dir "workspace/dart_single_image/test"
+```
+
+1)Create local DART:
+
+py -3.10 -m venv .venv-dart
+.\.venv-dart\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
+
+2)Download
+New-Item -ItemType Directory -Force external
+cd external
+
+git clone https://github.com/chen-xin-94/DART.git
+git clone https://github.com/IDEA-Research/GroundingDINO.git
+
+3)cd D:\auto-layout-ai\external\GroundingDINO
+
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -r requirements.txt
+python -m pip install "transformers==4.30.2"
+python -m pip install --no-build-isolation -e .
+
+4)New-Item -ItemType Directory -Force D:\auto-layout-ai\models\dart\groundingdino
+
+cd D:\auto-layout-ai\models\dart\groundingdino
+
+Invoke-WebRequest `
+  -Uri "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth" `
+  -OutFile "groundingdino_swint_ogc.pth"
+
+Пример проверки(в samples надо закинуть jpeg фото):
+cd D:\auto-layout-ai\external\GroundingDINO
+
+python demo\inference_on_a_image.py `
+  -c groundingdino\config\GroundingDINO_SwinT_OGC.py `
+  -p D:\auto-layout-ai\models\dart\groundingdino\groundingdino_swint_ogc.pth `
+  -i D:\auto-layout-ai\samples\test.jpg `
+  -o D:\auto-layout-ai\workspace\dart_check\official_demo `
+  -t "wood board . plank ." `
+  --cpu-only

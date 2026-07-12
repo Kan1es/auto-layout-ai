@@ -48,3 +48,12 @@ class DartSettings(BaseModel):
 class Annotation(BaseModel):
     image_id: str
     objects: list[AnnotationObj]
+
+
+class DatasetError(BaseModel):
+    stage: str
+    image_id: str | None = None
+    filename: str | None = None
+    message: str
+    details: dict | list | str | None = None
+    created_at: datetime = Field(default_factory=datetime.now)
