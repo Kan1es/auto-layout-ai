@@ -46,9 +46,58 @@ def create_api_router(workspace_root, dataset_limits):
     def save_metadata(dataset_id, metadata):
         write_json(dataset_dir(dataset_id) / "metadata.json", metadata)
 
+    def errors_path(dataset_id):
+        return dataset_dir(dataset_id) / "results" / "errors.json"
+
+    def load_dataset_errors(dataset_id):
+        path = errors_path(dataset_id)
+        if not path.exists():
+            return []
+
+        data = read_json(path)
+        return data.get("errors", [])
+
+    def save_dataset_errors(dataset_id, errors):
+        write_json(errors_path(dataset_id), {"errors": errors})
+
+    def make_dataset_error(stage, image_id, filename, message, details=None):
+        return DatasetError(
+            stage=stage,
+            image_id=image_id,
+            filename=filename,
+            message=message,
+            details=details,
+        ).model_dump(mode="json")
+
+    def replace_stage_errors(dataset_id, stage, new_errors):
+        errors = [
+            error
+            for error in load_dataset_errors(dataset_id)
+            if error.get("stage") != stage
+        ]
+        errors.extend(new_errors)
+        save_dataset_errors(dataset_id, errors)
+        return errors
+
     def build_dataset_stats(dataset_id):
         metadata = load_metadata(dataset_id)
         stats = calculate_dataset_stats(dataset_id, dataset_dir(dataset_id))
+        dataset_errors = [
+            make_dataset_error(
+                stage="dataset_stats",
+                image_id=image.get("id"),
+                filename=image.get("filename"),
+                message="Image could not be read.",
+                details={
+                    "path": image.get("path"),
+                    "reason": image.get("error"),
+                },
+            )
+            for image in stats["images"]
+            if not image.get("readable")
+        ]
+        replace_stage_errors(dataset_id, "dataset_stats", dataset_errors)
+
         metadata["stats"] = {
             "image_count": stats["image_count"],
             "readable_image_count": stats["readable_image_count"],
@@ -63,6 +112,12 @@ def create_api_router(workspace_root, dataset_limits):
         metadata["image_count"] = stats["image_count"]
         metadata["warnings"] = stats["warnings"]
         save_metadata(dataset_id, metadata)
+        if dataset_errors:
+            logger.warning(
+                "Dataset %s has %s unreadable image(s) during stats calculation.",
+                dataset_id,
+                len(dataset_errors),
+            )
         return stats
 
     @router.post("/datasets/upload", status_code=201)
@@ -248,8 +303,17 @@ def create_api_router(workspace_root, dataset_limits):
         load_metadata(dataset_id)
         root = dataset_dir(dataset_id)
         results_dir = root / "results"
+        annotations_path = results_dir / "annotations_internal.json"
+        annotations = (
+            read_json(annotations_path).get("annotations", [])
+            if annotations_path.exists()
+            else []
+        )
+        errors = load_dataset_errors(dataset_id)
         return {
             "dataset_id": dataset_id,
+            "annotations": annotations,
+            "errors": errors,
             "annotations_url": to_workspace_url(results_dir / "annotations_internal.json"),
             "errors_url": to_workspace_url(results_dir / "errors.json"),
             "previews_url": to_workspace_url(results_dir / "previews"),

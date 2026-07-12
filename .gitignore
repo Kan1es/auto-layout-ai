@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -6,6 +6,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.venv-*/
 venv/
 env/
 
@@ -17,6 +18,8 @@ config/app.local.json
 # Local datasets and generated outputs
 workspace/*
 !workspace/.gitkeep
+samples/*
+!samples/.gitkeep
 
 # Model weights and large local artifacts
 models/
@@ -25,6 +28,12 @@ models/
 *.onnx
 *.safetensors
 *.ckpt
+*.bin
+*.engine
+
+# External ML repositories checked out locally
+external/
+DART/
 
 # OS/editor noise
 .DS_Store
@@ -37,3 +46,5 @@ node_modules/
 dist/
 build/
 .vite/
+
+

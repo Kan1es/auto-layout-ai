@@ -4,31 +4,258 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Auto Layout AI</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="static/styles.css" />
   </head>
   <body>
-    <main class="app-shell">
-      <section class="panel">
-        <div class="eyebrow">Local MVP</div>
-        <h1>Auto Layout AI</h1>
-        <p class="lead">
-          Локальный сценарий авторазметки: ZIP, статистика, DART, экспорт в CVAT.
-        </p>
-
-        <div class="status-row">
-          <span class="status-dot" id="statusDot"></span>
-          <span id="healthStatus">Проверяем backend...</span>
+    <div class="app-shell">
+      <aside class="rail">
+  
+        <div class="health">
+          <span class="dot" id="statusDot"></span>
+          <span id="healthStatus">Проверяем backend…</span>
         </div>
 
-        <div class="steps" aria-label="MVP steps">
-          <div>1. Загрузить ZIP</div>
-          <div>2. Посчитать статистику</div>
-          <div>3. Выбрать кадры</div>
-          <div>4. Настроить DART</div>
-          <div>5. Экспортировать в CVAT</div>
-        </div>
-      </section>
-    </main>
+        <nav class="steps-nav" id="stepsNav" aria-label="Шаги пайплайна"></nav>
+
+        <div class="rail-footer" id="datasetBadge">dataset: —</div>
+      </aside>
+
+      <main class="content">
+        <!--1 окно-->
+        <section class="screen" data-screen="upload">
+          <div class="screen-head">
+            <span class="eyebrow">Шаг 1 / 7</span>
+            <h2>Загрузка датасета</h2>
+            <p>Загрузите ZIP-архив с изображениями. Сервис распакует его и подготовит рабочую папку датасета.</p>
+          </div>
+
+          <div class="card">
+            <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Выбрать ZIP-файл">
+              <div id="dropzoneText">
+                Перетащите <strong>.zip</strong> сюда или нажмите, чтобы выбрать файл
+              </div>
+              <input type="file" id="zipInput" accept=".zip" hidden />
+            </div>
+
+            <div class="field" id="uploadProgressWrap" hidden style="margin-top:16px;">
+              <label>Загрузка и распаковка</label>
+              <div class="progress"><div class="progress-bar" id="uploadProgressBar"></div></div>
+              <span class="hint" id="uploadProgressText">0%</span>
+            </div>
+
+            <div id="uploadError"></div>
+          </div>
+
+          <div class="footer-nav">
+            <span></span>
+            <button class="btn btn-primary" id="toStats" disabled>Далее: статистика →</button>
+          </div>
+        </section>
+
+        <!--2 окно-->
+        <section class="screen" data-screen="stats">
+          <div class="screen-head">
+            <span class="eyebrow">Шаг 2 / 7</span>
+            <h2>Статистика датасета</h2>
+            <p>Число изображений, разрешения, расширения файлов и предупреждения о датасете.</p>
+          </div>
+
+          <div class="card">
+            <div id="statsBody" class="empty-state">Статистика ещё не загружена.</div>
+          </div>
+
+          <div class="footer-nav">
+            <button class="btn" id="backToUpload">← Назад</button>
+            <button class="btn btn-primary" id="toSelect" disabled>Далее: отбор кадров →</button>
+          </div>
+        </section>
+
+        <!--3 окно-->
+        <section class="screen" data-screen="select">
+          <div class="screen-head">
+            <span class="eyebrow">Шаг 3 / 7</span>
+            <h2>Отбор репрезентативных кадров</h2>
+            <p>Выберите N характерных изображений — на них будет настраиваться DART перед авторазметкой всего датасета.</p>
+          </div>
+
+          <div class="card">
+            <div class="field" style="max-width:220px;">
+              <label for="repN">Сколько кадров отобрать (N)</label>
+              <input type="number" id="repN" min="1" value="8" />
+            </div>
+            <button class="btn btn-accent" id="repInit">Начать отбор</button>
+          </div>
+
+          <div class="card" id="repCard" hidden>
+            <div class="frame-viewer">
+              <div class="frame-image-wrap bracketed" id="frameImageWrap">
+                <span class="br-tr"></span><span class="br-br"></span>
+                <span class="placeholder" id="framePlaceholder">нет изображения</span>
+                <img id="frameImage" hidden />
+              </div>
+              <div class="frame-meta">
+                <span id="frameFilename">—</span>
+                <span id="frameApprovedPill" class="pill">не отобрано</span>
+              </div>
+              <div class="btn-row">
+                <button class="btn" id="framePrev">← Назад</button>
+                <button class="btn btn-accent" id="frameApprove">Одобрить</button>
+                <button class="btn btn-danger" id="frameUnapprove" hidden>Снять отбор</button>
+                <button class="btn" id="frameNext">Вперёд →</button>
+              </div>
+              <div class="approve-counter">Отобрано: <b id="approvedCount">0</b> / <span id="approvedTarget">0</span></div>
+            </div>
+          </div>
+
+          <div class="footer-nav">
+            <button class="btn" id="backToStats">← Назад</button>
+            <button class="btn btn-primary" id="toDart" disabled>Далее: настройка DART →</button>
+          </div>
+        </section>
+
+        <!--4 окно-->
+        <section class="screen" data-screen="dart">
+          <div class="screen-head">
+            <span class="eyebrow">Шаг 4 / 7</span>
+            <h2>Настройка DART</h2>
+            <p>Задайте prompt, порог уверенности и режим разметки, затем проверьте результат на выбранных кадрах.</p>
+          </div>
+
+          <div class="card two-col">
+            <div>
+              <div class="field">
+                <label for="dartPrompt">Prompt</label>
+                <input type="text" id="dartPrompt" placeholder="например: bolt" />
+              </div>
+              <div class="field">
+                <label for="dartConfidence">Confidence: <span id="dartConfidenceVal">0.35</span></label>
+                <input type="range" id="dartConfidence" min="0" max="1" step="0.01" value="0.35" />
+              </div>
+              <div class="field">
+                <label for="dartMode">Режим</label>
+                <select id="dartMode">
+                  <option value="bbox">bbox</option>
+                  <option value="mask">mask</option>
+                  <option value="bbox_and_mask">bbox + mask</option>
+                </select>
+              </div>
+              <div class="field" style="flex-direction:row; align-items:center; gap:8px;">
+                <input type="checkbox" id="dartOverlay" checked style="width:auto;" />
+                <label for="dartOverlay" style="margin:0;">Показывать overlay в preview</label>
+              </div>
+              <div class="field">
+                <label for="dartPreviewImage">Кадр для preview (из отобранных)</label>
+                <select id="dartPreviewImage"></select>
+              </div>
+              <button class="btn btn-accent" id="dartPreviewBtn">Сделать preview</button>
+            </div>
+
+            <div>
+              <div class="frame-image-wrap bracketed" id="previewImageWrap">
+                <span class="br-tr"></span><span class="br-br"></span>
+                <span class="placeholder" id="previewPlaceholder">preview появится здесь</span>
+                <img id="previewImage" hidden />
+              </div>
+              <div id="previewObjects" style="margin-top:10px;"></div>
+            </div>
+          </div>
+
+          <div class="footer-nav">
+            <button class="btn" id="backToSelect">← Назад</button>
+            <button class="btn btn-primary" id="toAutolabel">Далее: авторазметка →</button>
+          </div>
+        </section>
+
+        <!--5 окно-->
+        <section class="screen" data-screen="autolabel">
+          <div class="screen-head">
+            <span class="eyebrow">Шаг 5 / 7</span>
+            <h2>Авторазметка датасета</h2>
+            <p>Запустите обработку всех изображений сохранёнными настройками DART. Ошибки по отдельным кадрам не останавливают процесс.</p>
+          </div>
+
+          <div class="card">
+            <div class="btn-row" style="margin-bottom:16px;">
+              <button class="btn btn-accent" id="autolabelStart">Запустить авторазметку</button>
+              <button class="btn btn-danger" id="autolabelStop" disabled>Остановить</button>
+            </div>
+
+            <div class="field">
+              <label>Прогресс: <span id="autolabelProgressText">0 / 0</span></label>
+              <div class="progress"><div class="progress-bar" id="autolabelProgressBar"></div></div>
+            </div>
+
+            <div id="autolabelErrors"></div>
+          </div>
+
+          <div class="footer-nav">
+            <button class="btn" id="backToDart">← Назад</button>
+            <button class="btn btn-primary" id="toExport" disabled>Далее: экспорт в CVAT →</button>
+          </div>
+        </section>
+
+        <!--6 окно-->
+        <section class="screen" data-screen="export">
+          <div class="screen-head">
+            <span class="eyebrow">Шаг 6 / 7</span>
+            <h2>Экспорт в CVAT</h2>
+            <p>Подготовьте машинно-читаемую разметку в формате CVAT и импортируйте исходные изображения вместе с аннотациями.</p>
+          </div>
+
+          <div class="card">
+            <div class="field" style="max-width:260px;">
+              <label for="exportFormat">Формат экспорта</label>
+              <select id="exportFormat">
+                <option value="yolo">YOLO (bbox)</option>
+                <option value="coco">COCO (segmentation)</option>
+              </select>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-accent" id="exportBuild">Подготовить экспорт</button>
+              <button class="btn btn-primary" id="exportImport" disabled>Импортировать в CVAT</button>
+            </div>
+            <div id="exportStatus" style="margin-top:14px;"></div>
+          </div>
+
+          <div class="footer-nav">
+            <button class="btn" id="backToAutolabel">← Назад</button>
+            <button class="btn btn-primary" id="toResults">Далее: результаты →</button>
+          </div>
+        </section>
+
+        <!--7 окно-->
+        <section class="screen" data-screen="results">
+          <div class="screen-head">
+            <span class="eyebrow">Шаг 7 / 7</span>
+            <h2>Результаты</h2>
+            <p>Ссылки на JSON-разметку, preview-изображения, экспортные файлы для CVAT и список ошибок.</p>
+          </div>
+
+          <div class="card">
+            <h3 class="section-title">Файлы</h3>
+            <div class="link-list" id="resultsLinks">
+              <div class="empty-state">Результатов пока нет — запустите авторазметку.</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3 class="section-title">Preview</h3>
+            <div class="results-grid" id="resultsPreviews"></div>
+          </div>
+
+          <div class="card">
+            <h3 class="section-title">Ошибки</h3>
+            <div id="resultsErrors" class="empty-state">Ошибок нет.</div>
+          </div>
+
+          <div class="footer-nav">
+            <button class="btn" id="backToExport">← Назад</button>
+            <span></span>
+          </div>
+        </section>
+      </main>
+    </div>
+
     <script src="/static/app.js"></script>
   </body>
 </html>

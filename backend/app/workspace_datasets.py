@@ -127,13 +127,32 @@ class DatasetWorkspace:
         write_json(
             self.errors_path,
             {
-                "errors": errors
+                "errors": [
+                    error.model_dump(mode="json")
+                    if isinstance(error, DatasetError)
+                    else error
+                    for error in errors
+                ]
             }
         )
 
     def load_errors(self):
+        if not self.errors_path.exists():
+            return []
+
         data = read_json(self.errors_path)
-        return data.get("errors", [])
+        return [
+            DatasetError.model_validate(error)
+            for error in data.get("errors", [])
+        ]
+
+    def append_error(self, error):
+        if not isinstance(error, DatasetError):
+            error = DatasetError.model_validate(error)
+
+        errors = self.load_errors()
+        errors.append(error)
+        self.save_errors(errors)
 
     def save_raw_result(self, image_id, result):
         path = self.raw_dir / f"{image_id}.json"
