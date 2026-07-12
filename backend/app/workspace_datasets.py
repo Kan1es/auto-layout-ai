@@ -20,7 +20,7 @@ class DatasetWorkspace:
         )
 
         self.image_dir = self.dataset_dir / "images"
-        self.results_dir = self.dataset_dir / "result"
+        self.results_dir = self.dataset_dir / "results"
         self.raw_dir = self.results_dir / "raw"
         self.previews_dir = self.results_dir / "previews"
         self.metadata_path = self.dataset_dir / "metadata.json"
@@ -31,7 +31,7 @@ class DatasetWorkspace:
                 self.dataset_dir / "dart_settings.json"
         )
         self.annotations_path = (
-                self.results_dir / "annotations.json"
+                self.results_dir / "annotations_internal.json"
         )
         self.errors_path = self.results_dir / "errors.json"
 

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.api import create_api_router
 from backend.app.image_stats import calculate_dataset_stats
-
+from backend.app.config import DatasetLimits
 
 def write_png(path: Path, width: int, height: int) -> None:
     path.write_bytes(
@@ -119,9 +119,21 @@ class ImageStatsTest(unittest.TestCase):
                 }),
                 encoding="utf-8",
             )
+            dataset_limits = DatasetLimits(
+                max_zip_mb=10,
+                max_extracted_mb=20,
+                max_images=100,
+                supported_extensions=(
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".bmp",
+                    ".webp",
+                ),
+            )
 
             app = FastAPI()
-            app.include_router(create_api_router(workspace_root))
+            app.include_router(create_api_router(workspace_root, dataset_limits))
             response = TestClient(app).get("/api/datasets/sample/stats")
 
             metadata = json.loads((dataset_root / "metadata.json").read_text(encoding="utf-8"))

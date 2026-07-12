@@ -18,10 +18,11 @@ class ImageItem(BaseModel):
     id: str
     filename: str
     path: str
-    width: int
-    height: int
-    approved: bool
-    viewed: bool
+    width: int | None
+    height: int | None
+    approved: bool = False
+    viewed: bool = False
+    readable: bool = True
 
 class Dataset(BaseModel):
     id: str

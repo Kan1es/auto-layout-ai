@@ -15,6 +15,7 @@
   },
   "dataset_limits": {
     "max_zip_mb": 512,
+    "max_extracted_mb": 2048,
     "max_images": 150,
     "supported_extensions": [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
   }
