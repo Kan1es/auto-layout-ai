@@ -3,12 +3,12 @@ from pathlib import Path
 from .json_read_write import read_json, write_json
 
 from .models import (
+    DatasetError,
     Annotation,
     DartSettings,
     Dataset,
     RepresentativeState
 )
-
 
 class DatasetWorkspace:
     def __init__(self, root, id):
