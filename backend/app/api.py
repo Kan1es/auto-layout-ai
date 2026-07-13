@@ -1,16 +1,19 @@
 from datetime import datetime
 import logging
 from pathlib import Path
+import shutil
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from .dataset_zip_importer import import_dataset_zip
+from .dart_runner import DartRunner
 from .errors import DatasetImportError
 from .image_stats import calculate_dataset_stats
 from .json_read_write import read_json, write_json
 from .models import (
+    Annotation,
     DatasetError,
     RepresentativeImageResponse,
     RepresentativeInitRequest,
@@ -319,6 +322,110 @@ def create_api_router(workspace_root, dataset_limits):
             "previews_url": to_workspace_url(results_dir / "previews"),
             "dart": {"status": "stub"},
             "cvat": {"status": "stub"},
+        }
+
+    @router.post("/datasets/{dataset_id}/autolabel/start")
+    def start_autolabel(dataset_id: str):
+        """Run DART over the complete dataset, continuing after image failures.
+
+        This endpoint is intentionally synchronous for the MVP.  Background
+        execution, progress reporting, and cancellation are added by TASK-018.
+        """
+        metadata = load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+
+        if not workspace.dart_settings_path.exists():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DART_SETTINGS_NOT_FOUND",
+                    "message": (
+                        "DART settings have not been saved. Configure and save "
+                        "DART settings before starting autolabeling."
+                    ),
+                    "details": {"dataset_id": dataset_id},
+                },
+            )
+
+        try:
+            settings = workspace.load_dart_settings()
+        except Exception as error:
+            logger.warning(
+                "Dataset %s has invalid DART settings: %s", dataset_id, error
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DART_SETTINGS_INVALID",
+                    "message": "Saved DART settings are invalid.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            ) from error
+
+        images = metadata.get("images", [])
+        runner = DartRunner(output_root=workspace.results_dir / "dart_runs")
+        annotations = []
+        autolabel_errors = []
+
+        for image in images:
+            image_id = image.get("id")
+            filename = image.get("filename")
+            image_path = dataset_dir(dataset_id) / image.get("path", "")
+
+            try:
+                result = runner.run_image(
+                    image_path=image_path,
+                    prompt=settings.prompt,
+                    confidence=settings.confidence,
+                    mode=settings.mode,
+                )
+                workspace.save_raw_result(image_id, result.raw_result)
+
+                annotation = Annotation.model_validate(
+                    {
+                        "image_id": image_id,
+                        "objects": result.normalized_result.get("objects", []),
+                    }
+                )
+                annotations.append(annotation)
+
+                if settings.show_overlay and result.preview_path:
+                    preview_path = workspace.previews_dir / f"{image_id}_preview.jpg"
+                    shutil.copy2(result.preview_path, preview_path)
+            except Exception as error:
+                logger.warning(
+                    "Autolabeling failed for dataset %s image %s: %s",
+                    dataset_id,
+                    image_id,
+                    error,
+                )
+                autolabel_errors.append(
+                    DatasetError(
+                        stage="autolabel",
+                        image_id=image_id,
+                        filename=filename,
+                        message=str(error),
+                        details={"exception_type": type(error).__name__},
+                    )
+                )
+
+        workspace.save_annotations(annotations)
+        all_errors = replace_stage_errors(
+            dataset_id,
+            "autolabel",
+            [error.model_dump(mode="json") for error in autolabel_errors],
+        )
+
+        return {
+            "status": "completed",
+            "dataset_id": dataset_id,
+            "total_images": len(images),
+            "annotated_images": len(annotations),
+            "failed_images": len(autolabel_errors),
+            "annotations_url": to_workspace_url(workspace.annotations_path),
+            "errors_url": to_workspace_url(workspace.errors_path),
+            "previews_url": to_workspace_url(workspace.previews_dir),
+            "errors": all_errors,
         }
 
     @router.post(
