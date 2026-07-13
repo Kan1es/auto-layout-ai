@@ -8,11 +8,21 @@ class Parameters(BaseModel):
     width: float
     height: float
 
+class InternalImage(BaseModel):
+    id: str
+    filename: str
+    width: int
+    height: int
+
 class AnnotationObj(BaseModel):
     label: str
     confidence: float
     bbox: Parameters | None
     mask: dict | list | None
+
+class InternalAnnotation(BaseModel):
+    image: InternalImage
+    objects: list[AnnotationObj] = Field(default_factory=list)
 
 class ImageItem(BaseModel):
     id: str
@@ -56,7 +66,6 @@ class DartSettings(BaseModel):
 class Annotation(BaseModel):
     image_id: str
     objects: list[AnnotationObj]
-
 
 
 class RepresentativeInitRequest(BaseModel):
