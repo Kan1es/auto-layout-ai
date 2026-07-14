@@ -98,3 +98,6 @@ class RepresentativeStateResponse(BaseModel):
     can_go_prev: bool
     can_go_next: bool
     completed: bool
+
+class CvatExportRequest(BaseModel):
+    format: Literal["yolo", "coco"] = "yolo"

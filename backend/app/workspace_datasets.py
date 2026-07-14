@@ -26,6 +26,7 @@ class DatasetWorkspace:
         self.results_dir = self.dataset_dir / "results"
         self.raw_dir = self.results_dir / "raw"
         self.previews_dir = self.results_dir / "previews"
+        self.cvat_export_dir = self.dataset_dir / "cvat_export"
         self.metadata_path = self.dataset_dir / "metadata.json"
         self.selected_images_path = (
                 self.dataset_dir / "selected_images.json"
@@ -37,7 +38,7 @@ class DatasetWorkspace:
                 self.results_dir / "annotations_internal.json"
         )
         self.errors_path = self.results_dir / "errors.json"
-
+        self.autolabel_status_path = self.results_dir / "autolabel_status.json"
         self.upload_dir = self.dataset_dir / "upload"
         self.original_zip_path = self.upload_dir / "original.zip"
 
@@ -55,6 +56,11 @@ class DatasetWorkspace:
         )
 
         self.previews_dir.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        self.cvat_export_dir.mkdir(
             parents=True,
             exist_ok=True
         )
@@ -170,3 +176,24 @@ class DatasetWorkspace:
     def load_representative_state(self):
         data = read_json(self.representative_path)
         return RepresentativeState.model_validate(data)
+
+    def save_autolabel_status(self, status):
+        write_json(
+            self.autolabel_status_path,
+            status
+        )
+
+    def load_autolabel_status(self):
+        if not self.autolabel_status_path.exists():
+            return {
+                "status": "idle",
+                "total_images": 0,
+                "processed_images": 0,
+                "failed_images": 0,
+                "current_image_id": None,
+                "started_at": None,
+                "finished_at": None,
+                "stop_requested": False,
+            }
+
+        return read_json(self.autolabel_status_path)

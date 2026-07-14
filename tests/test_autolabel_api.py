@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
-
+from PIL import Image
 from fastapi import FastAPI
 from fastapi.dependencies import utils as fastapi_dependency_utils
 from fastapi.testclient import TestClient
@@ -51,6 +51,31 @@ class FakeDartRunner:
 
 
 class AutolabelApiTest(unittest.TestCase):
+    def test_autolabel_status_is_idle_before_start(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_dataset(root)
+            client = self.make_client(root)
+
+            response = client.get("/api/datasets/ds_001/autolabel/status")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "idle")
+            self.assertEqual(response.json()["processed_images"], 0)
+            self.assertFalse(response.json()["stop_requested"])
+
+    def test_autolabel_stop_returns_not_running_when_idle(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.create_dataset(root)
+            client = self.make_client(root)
+
+            response = client.post("/api/datasets/ds_001/autolabel/stop")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "not_running")
+            self.assertEqual(response.json()["autolabel"]["status"], "idle")
+
     def make_client(self, root):
         app = FastAPI()
         # The endpoint under test has no multipart input.  The test environment
@@ -68,6 +93,54 @@ class AutolabelApiTest(unittest.TestCase):
         app.include_router(router)
         return TestClient(app)
 
+    def test_autolabel_saves_failed_status_on_unexpected_process_error(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = self.create_dataset(root)
+            client = self.make_client(root)
+
+            with patch.object(
+                DatasetWorkspace,
+                "save_annotations",
+                side_effect=RuntimeError("synthetic save failure"),
+            ):
+                with patch("backend.app.api.DartRunner", FakeDartRunner):
+                    with self.assertRaises(RuntimeError):
+                        client.post("/api/datasets/ds_001/autolabel/start")
+
+            status = workspace.load_autolabel_status()
+            self.assertEqual(status["status"], "failed")
+            self.assertEqual(status["total_images"], 3)
+            self.assertEqual(status["processed_images"], 3)
+            self.assertEqual(status["failed_images"], 1)
+            self.assertIsNone(status["current_image_id"])
+            self.assertFalse(status["stop_requested"])
+
+    def test_autolabel_stop_marks_running_status_as_stopping(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = self.create_dataset(root)
+            workspace.save_autolabel_status(
+                {
+                    "status": "running",
+                    "total_images": 3,
+                    "processed_images": 1,
+                    "failed_images": 0,
+                    "current_image_id": "image_000001",
+                    "started_at": "2026-07-14T00:00:00Z",
+                    "finished_at": None,
+                    "stop_requested": False,
+                }
+            )
+            client = self.make_client(root)
+
+            response = client.post("/api/datasets/ds_001/autolabel/stop")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "stopping")
+            self.assertEqual(response.json()["autolabel"]["status"], "stopping")
+            self.assertTrue(response.json()["autolabel"]["stop_requested"])
+
     def create_dataset(self, root, *, save_settings=True):
         workspace = DatasetWorkspace(root, "ds_001")
         workspace.create()
@@ -75,7 +148,9 @@ class AutolabelApiTest(unittest.TestCase):
         for index in range(1, 4):
             image_id = f"image_{index:06d}"
             relative_path = f"images/{image_id}.jpg"
-            (workspace.dataset_dir / relative_path).write_bytes(b"image")
+            image_path = workspace.dataset_dir / relative_path
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (10, 20), "white").save(image_path)
             images.append(
                 ImageItem(
                     id=image_id,

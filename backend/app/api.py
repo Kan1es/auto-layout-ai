@@ -1,17 +1,17 @@
-from datetime import datetime
 import logging
 from pathlib import Path
-import shutil
 from tempfile import TemporaryDirectory
 from uuid import uuid4
-
+from datetime import datetime
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from .cvat_export import export_cvat_yolo
 
 from .dataset_zip_importer import import_dataset_zip
 from .dart_runner import DartRunner
 from .errors import DatasetImportError
 from .image_stats import calculate_dataset_stats
 from .json_read_write import read_json, write_json
+from .preview_renderer import PreviewRenderer
 from .models import (
     Annotation,
     DatasetError,
@@ -19,6 +19,7 @@ from .models import (
     RepresentativeInitRequest,
     RepresentativeState,
     RepresentativeStateResponse,
+    CvatExportRequest
 )
 from .workspace_datasets import DatasetWorkspace
 
@@ -324,6 +325,110 @@ def create_api_router(workspace_root, dataset_limits):
             "cvat": {"status": "stub"},
         }
 
+    @router.post("/datasets/{dataset_id}/cvat/export")
+    def export_cvat(dataset_id: str, request: CvatExportRequest | None = None):
+        metadata = load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+        request = request or CvatExportRequest()
+
+        if request.format == "coco":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "CVAT_EXPORT_FORMAT_NOT_SUPPORTED",
+                    "message": "COCO export is not available yet. Use YOLO format.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "format": request.format,
+                        "supported_formats": ["yolo"],
+                    },
+                },
+            )
+
+        if not workspace.annotations_path.exists():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ANNOTATIONS_NOT_FOUND",
+                    "message": "annotations_internal.json was not found.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            )
+
+        annotations_data = read_json(workspace.annotations_path)
+        if not annotations_data.get("annotations"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ANNOTATIONS_EMPTY",
+                    "message": "annotations_internal.json does not contain annotations.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            )
+
+        return export_cvat_yolo(
+            dataset_dir=workspace.dataset_dir,
+            workspace_root=workspace_root,
+            metadata=metadata,
+            annotations_data=annotations_data,
+        )
+
+    def now_iso():
+        return datetime.utcnow().isoformat() + "Z"
+
+    def build_autolabel_status(
+        *,
+        status,
+        total_images,
+        processed_images=0,
+        failed_images=0,
+        current_image_id=None,
+        started_at=None,
+        finished_at=None,
+        stop_requested=False,
+    ):
+        return {
+            "status": status,
+            "total_images": total_images,
+            "processed_images": processed_images,
+            "failed_images": failed_images,
+            "current_image_id": current_image_id,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "stop_requested": stop_requested,
+        }
+
+    @router.get("/datasets/{dataset_id}/autolabel/status")
+    def get_autolabel_status(dataset_id: str):
+        load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+        return workspace.load_autolabel_status()
+
+    @router.post("/datasets/{dataset_id}/autolabel/stop")
+    def stop_autolabel(dataset_id: str):
+        load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+        status = workspace.load_autolabel_status()
+
+        if status.get("status") not in ["running", "stopping"]:
+            return {
+                "status": "not_running",
+                "dataset_id": dataset_id,
+                "message": "Autolabeling is not running.",
+                "autolabel": status,
+            }
+
+        status["status"] = "stopping"
+        status["stop_requested"] = True
+        workspace.save_autolabel_status(status)
+
+        return {
+            "status": "stopping",
+            "dataset_id": dataset_id,
+            "message": "Stop request has been saved. Autolabeling will stop between images.",
+            "autolabel": status,
+        }
+
     @router.post("/datasets/{dataset_id}/autolabel/start")
     def start_autolabel(dataset_id: str):
         """Run DART over the complete dataset, continuing after image failures.
@@ -364,60 +469,143 @@ def create_api_router(workspace_root, dataset_limits):
 
         images = metadata.get("images", [])
         runner = DartRunner(output_root=workspace.results_dir / "dart_runs")
+        preview_renderer = PreviewRenderer()
         annotations = []
         autolabel_errors = []
 
-        for image in images:
-            image_id = image.get("id")
-            filename = image.get("filename")
-            image_path = dataset_dir(dataset_id) / image.get("path", "")
+        started_at = now_iso()
+        workspace.save_autolabel_status(
+            build_autolabel_status(
+                status="running",
+                total_images=len(images),
+                started_at=started_at,
+            )
+        )
+        try:
+            for image in images:
+                current_status = workspace.load_autolabel_status()
+                if current_status.get("stop_requested"):
+                    workspace.save_autolabel_status(
+                        build_autolabel_status(
+                            status="stopped",
+                            total_images=len(images),
+                            processed_images=len(annotations) + len(autolabel_errors),
+                            failed_images=len(autolabel_errors),
+                            current_image_id=None,
+                            started_at=started_at,
+                            finished_at=now_iso(),
+                            stop_requested=True,
+                        )
+                    )
+                    break
 
-            try:
-                result = runner.run_image(
-                    image_path=image_path,
-                    prompt=settings.prompt,
-                    confidence=settings.confidence,
-                    mode=settings.mode,
-                )
-                workspace.save_raw_result(image_id, result.raw_result)
+                image_id = image.get("id")
+                filename = image.get("filename")
+                image_path = dataset_dir(dataset_id) / image.get("path", "")
 
-                annotation = Annotation.model_validate(
-                    {
-                        "image_id": image_id,
-                        "objects": result.normalized_result.get("objects", []),
-                    }
-                )
-                annotations.append(annotation)
-
-                if settings.show_overlay and result.preview_path:
-                    preview_path = workspace.previews_dir / f"{image_id}_preview.jpg"
-                    shutil.copy2(result.preview_path, preview_path)
-            except Exception as error:
-                logger.warning(
-                    "Autolabeling failed for dataset %s image %s: %s",
-                    dataset_id,
-                    image_id,
-                    error,
-                )
-                autolabel_errors.append(
-                    DatasetError(
-                        stage="autolabel",
-                        image_id=image_id,
-                        filename=filename,
-                        message=str(error),
-                        details={"exception_type": type(error).__name__},
+                workspace.save_autolabel_status(
+                    build_autolabel_status(
+                        status="running",
+                        total_images=len(images),
+                        processed_images=len(annotations) + len(autolabel_errors),
+                        failed_images=len(autolabel_errors),
+                        current_image_id=image_id,
+                        started_at=started_at,
                     )
                 )
 
-        workspace.save_annotations(annotations)
-        all_errors = replace_stage_errors(
-            dataset_id,
-            "autolabel",
-            [error.model_dump(mode="json") for error in autolabel_errors],
-        )
+                try:
+                    result = runner.run_image(
+                        image_path=image_path,
+                        prompt=settings.prompt,
+                        confidence=settings.confidence,
+                        mode=settings.mode,
+                    )
+                    workspace.save_raw_result(image_id, result.raw_result)
+
+                    annotation = Annotation.model_validate(
+                        {
+                            "image_id": image_id,
+                            "objects": result.normalized_result.get("objects", []),
+                        }
+                    )
+                    annotations.append(annotation)
+
+                    if settings.show_overlay:
+                        preview_path = workspace.previews_dir / f"{image_id}_preview.jpg"
+                        preview_renderer.render(
+                            image_path=image_path,
+                            annotation=annotation,
+                            output_path=preview_path,
+                            preview_url=to_workspace_url(preview_path),
+                        )
+
+                except Exception as error:
+                    logger.warning(
+                        "Autolabeling failed for dataset %s image %s: %s",
+                        dataset_id,
+                        image_id,
+                        error,
+                    )
+                    autolabel_errors.append(
+                        DatasetError(
+                            stage="autolabel",
+                            image_id=image_id,
+                            filename=filename,
+                            message=str(error),
+                            details={"exception_type": type(error).__name__},
+                        )
+                    )
+
+                workspace.save_autolabel_status(
+                    build_autolabel_status(
+                        status="running",
+                        total_images=len(images),
+                        processed_images=len(annotations) + len(autolabel_errors),
+                        failed_images=len(autolabel_errors),
+                        current_image_id=image_id,
+                        started_at=started_at,
+                    )
+                )
+
+            workspace.save_annotations(annotations)
+            all_errors = replace_stage_errors(
+                dataset_id,
+                "autolabel",
+                [error.model_dump(mode="json") for error in autolabel_errors],
+            )
+
+        except Exception:
+            workspace.save_autolabel_status(
+                build_autolabel_status(
+                    status="failed",
+                    total_images=len(images),
+                    processed_images=len(annotations) + len(autolabel_errors),
+                    failed_images=len(autolabel_errors),
+                    current_image_id=None,
+                    started_at=started_at,
+                    finished_at=now_iso(),
+                    stop_requested=False,
+                )
+            )
+            raise
+
+        final_status = workspace.load_autolabel_status()
+        if final_status.get("status") != "stopped":
+            final_status = build_autolabel_status(
+                status="completed",
+                total_images=len(images),
+                processed_images=len(annotations) + len(autolabel_errors),
+                failed_images=len(autolabel_errors),
+                current_image_id=None,
+                started_at=started_at,
+                finished_at=now_iso(),
+                stop_requested=False,
+            )
+            workspace.save_autolabel_status(final_status)
 
         return {
-            "status": "completed",
+            "status": final_status["status"],
             "dataset_id": dataset_id,
             "total_images": len(images),
             "annotated_images": len(annotations),
