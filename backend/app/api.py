@@ -1,4 +1,5 @@
 import logging
+import random
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -301,6 +302,7 @@ def create_api_router(workspace_root, dataset_limits):
             dataset_id=dataset_id,
             target_count=state.target_count,
             approved_count=len(state.approved_image_ids),
+            approved_image_ids=state.approved_image_ids,
             viewed_count=len(state.history),
             total_count=len(images),
             current_image=current_image,
@@ -315,21 +317,43 @@ def create_api_router(workspace_root, dataset_limits):
         root = dataset_dir(dataset_id)
         results_dir = root / "results"
         annotations_path = results_dir / "annotations_internal.json"
+        previews_dir = results_dir / "previews"
+        yolo_archive_path = root / "cvat_export" / "yolo_export.zip"
+        yolo_folder_path = root / "cvat_export" / "yolo"
         annotations = (
             read_json(annotations_path).get("annotations", [])
             if annotations_path.exists()
             else []
         )
         errors = load_dataset_errors(dataset_id)
+        previews = (
+            [
+                to_workspace_url(path)
+                for path in sorted(previews_dir.iterdir())
+                if path.is_file()
+            ]
+            if previews_dir.exists()
+            else []
+        )
+        cvat_export = (
+            {
+                "status": "ready",
+                "format": "yolo",
+                "archive_url": to_workspace_url(yolo_archive_path),
+                "folder_url": to_workspace_url(yolo_folder_path),
+            }
+            if yolo_archive_path.exists()
+            else {"status": "not_created"}
+        )
         return {
             "dataset_id": dataset_id,
             "annotations": annotations,
             "errors": errors,
             "annotations_url": to_workspace_url(results_dir / "annotations_internal.json"),
             "errors_url": to_workspace_url(results_dir / "errors.json"),
-            "previews_url": to_workspace_url(results_dir / "previews"),
-            "dart": {"status": "stub"},
-            "cvat": {"status": "stub"},
+            "previews": previews,
+            "previews_url": to_workspace_url(previews_dir),
+            "cvat_export": cvat_export,
         }
 
     @router.post("/datasets/{dataset_id}/cvat/export")
@@ -936,11 +960,16 @@ def create_api_router(workspace_root, dataset_limits):
         if len(image_ids) <= request.target_count:
             state = RepresentativeState(
                 target_count=request.target_count,
-                approved_image_ids=image_ids
+                history=image_ids,
+                current_index=0,
+                approved_image_ids=image_ids,
             )
         else:
+            first_image_id = random.choice(image_ids)
             state = RepresentativeState(
-                target_count=request.target_count
+                target_count=request.target_count,
+                history=[first_image_id],
+                current_index=0,
             )
         workspace = DatasetWorkspace(
             workspace_root,

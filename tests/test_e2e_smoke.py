@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import random
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -90,25 +89,27 @@ class EndToEndSmokeTest(unittest.TestCase):
             )
             self.assertEqual(initialized.status_code, 200, initialized.text)
 
-            approved_ids = []
-            # Known KAN-174 finding: backend.app.api does not import random.
-            # The harness injects it only to inspect the rest of the flow.
-            with patch(
-                "backend.app.api.random",
-                random.Random(174),
-                create=True,
-            ):
-                for _ in range(2):
-                    current = client.post(
-                        f"/api/datasets/{dataset_id}/representative/next"
-                    )
-                    self.assertEqual(current.status_code, 200, current.text)
-                    image_id = current.json()["current_image"]["id"]
-                    approved = client.post(
-                        f"/api/datasets/{dataset_id}/representative/approve"
-                    )
-                    self.assertEqual(approved.status_code, 200, approved.text)
-                    approved_ids.append(image_id)
+            approved_ids = [initialized.json()["current_image"]["id"]]
+            approved = client.post(
+                f"/api/datasets/{dataset_id}/representative/approve"
+            )
+            self.assertEqual(approved.status_code, 200, approved.text)
+            self.assertFalse(approved.json()["completed"])
+
+            current = client.post(
+                f"/api/datasets/{dataset_id}/representative/next"
+            )
+            self.assertEqual(current.status_code, 200, current.text)
+            approved_ids.append(current.json()["current_image"]["id"])
+            approved = client.post(
+                f"/api/datasets/{dataset_id}/representative/approve"
+            )
+            self.assertEqual(approved.status_code, 200, approved.text)
+            self.assertTrue(approved.json()["completed"])
+            self.assertEqual(
+                set(approved.json()["approved_image_ids"]),
+                set(approved_ids),
+            )
 
             settings = {
                 "prompt": "box",
@@ -164,6 +165,13 @@ class EndToEndSmokeTest(unittest.TestCase):
             self.assertEqual(results.status_code, 200, results.text)
             self.assertEqual(len(results.json()["annotations"]), 3)
             self.assertEqual(results.json()["errors"], [])
+            self.assertEqual(len(results.json()["previews"]), 3)
+            self.assertEqual(results.json()["cvat_export"]["status"], "ready")
+            self.assertTrue(
+                results.json()["cvat_export"]["archive_url"].endswith(
+                    "/cvat_export/yolo_export.zip"
+                )
+            )
 
 
 if __name__ == "__main__":

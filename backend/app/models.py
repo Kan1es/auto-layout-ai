@@ -115,6 +115,7 @@ class RepresentativeStateResponse(BaseModel):
     dataset_id: str
     target_count: int
     approved_count: int
+    approved_image_ids: list[str]
     viewed_count: int
     total_count: int
     current_image: RepresentativeImageResponse | None
