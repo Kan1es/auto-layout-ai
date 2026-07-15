@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal
 from datetime import datetime
 
@@ -56,12 +56,35 @@ class DatasetError(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
 
     
-class DartSettings(BaseModel):
+class DartSettingsRequest(BaseModel):
     prompt: str
-    confidence: float
+    confidence: float = Field(ge=0, le=1)
     mode: Literal["bbox", "mask", "bbox_and_mask"]
-    show_overlay: bool
+    show_overlay: bool = True
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Prompt не должен быть пустым.")
+        return value
+
+
+class DartSettings(DartSettingsRequest):
     updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class DartPreviewRequest(DartSettingsRequest):
+    image_id: str
+
+    @field_validator("image_id")
+    @classmethod
+    def validate_image_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Идентификатор изображения не должен быть пустым.")
+        return value
 
 class Annotation(BaseModel):
     image_id: str

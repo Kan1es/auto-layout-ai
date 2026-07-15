@@ -168,6 +168,13 @@ class DatasetWorkspace:
         path = self.raw_dir / f"{image_id}.json"
         return read_json(path)
 
+    def save_preview_results(self, image_id, raw_result, normalized_result):
+        raw_path = self.raw_dir / f"{image_id}_preview_raw.json"
+        normalized_path = self.raw_dir / f"{image_id}_preview_normalized.json"
+        write_json(raw_path, raw_result)
+        write_json(normalized_path, normalized_result)
+        return raw_path, normalized_path
+
     def save_representative_state(self, state: RepresentativeState) -> None:
         if not isinstance(state, RepresentativeState):
             raise TypeError("Expected RepresentativeState")

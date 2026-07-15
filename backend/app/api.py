@@ -7,13 +7,20 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from .cvat_export import export_cvat_yolo
 
 from .dataset_zip_importer import import_dataset_zip
-from .dart_runner import DartRunner
+from .dart_runner import (
+    DartRunner,
+    DartRunnerTimeout,
+    DartRunnerUnsupportedMode,
+)
 from .errors import DatasetImportError
 from .image_stats import calculate_dataset_stats
 from .json_read_write import read_json, write_json
 from .preview_renderer import PreviewRenderer
 from .models import (
     Annotation,
+    DartPreviewRequest,
+    DartSettings,
+    DartSettingsRequest,
     DatasetError,
     RepresentativeImageResponse,
     RepresentativeInitRequest,
@@ -375,6 +382,279 @@ def create_api_router(workspace_root, dataset_limits):
 
     def now_iso():
         return datetime.utcnow().isoformat() + "Z"
+
+    def require_supported_dart_mode(mode):
+        if mode not in DartRunner.supported_modes:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "DART_MODE_UNSUPPORTED",
+                    "message": f"Режим DART '{mode}' не поддерживается.",
+                    "details": {
+                        "mode": mode,
+                        "supported_modes": sorted(DartRunner.supported_modes),
+                    },
+                },
+            )
+
+    def make_dart_settings(request):
+        return DartSettings(
+            prompt=request.prompt,
+            confidence=request.confidence,
+            mode=request.mode,
+            show_overlay=request.show_overlay,
+        )
+
+    @router.get("/datasets/{dataset_id}/dart/settings")
+    def get_dart_settings(dataset_id: str):
+        load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+
+        if not workspace.dart_settings_path.exists():
+            return {
+                "prompt": "",
+                "confidence": 0.35,
+                "mode": "bbox",
+                "show_overlay": True,
+                "updated_at": None,
+            }
+
+        try:
+            return workspace.load_dart_settings().model_dump(mode="json")
+        except Exception as error:
+            logger.warning(
+                "Dataset %s has invalid DART settings: %s", dataset_id, error
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DART_SETTINGS_INVALID",
+                    "message": "Сохранённые настройки DART некорректны.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            ) from error
+
+    @router.post("/datasets/{dataset_id}/dart/settings")
+    def save_dart_settings(dataset_id: str, request: DartSettingsRequest):
+        load_metadata(dataset_id)
+        require_supported_dart_mode(request.mode)
+
+        settings = make_dart_settings(request)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+        workspace.save_dart_settings(settings)
+        return settings.model_dump(mode="json")
+
+    @router.post("/datasets/{dataset_id}/dart/preview")
+    def run_dart_preview(dataset_id: str, request: DartPreviewRequest):
+        metadata = load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+
+        if not workspace.representative_path.exists():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "REPRESENTATIVE_NOT_INITIALIZED",
+                    "message": "Отбор репрезентативных изображений не инициализирован.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            )
+
+        image = next(
+            (
+                item
+                for item in metadata.get("images", [])
+                if item.get("id") == request.image_id
+            ),
+            None,
+        )
+        if image is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "IMAGE_NOT_FOUND",
+                    "message": "Изображение не найдено в датасете.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                    },
+                },
+            )
+        if not image.get("readable", True):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMAGE_NOT_READABLE",
+                    "message": "Изображение невозможно прочитать и использовать для preview.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                    },
+                },
+            )
+
+        try:
+            representative = workspace.load_representative_state()
+        except Exception as error:
+            logger.warning(
+                "Dataset %s has invalid representative state: %s", dataset_id, error
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "REPRESENTATIVE_STATE_INVALID",
+                    "message": "Сохранённое состояние отбора репрезентативных изображений некорректно.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            ) from error
+
+        if request.image_id not in representative.approved_image_ids:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMAGE_NOT_APPROVED",
+                    "message": "Preview можно запускать только для подтверждённых репрезентативных изображений.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                    },
+                },
+            )
+
+        require_supported_dart_mode(request.mode)
+        image_path = dataset_dir(dataset_id) / image.get("path", "")
+        runner = DartRunner(output_root=workspace.results_dir / "dart_runs")
+
+        try:
+            run_result = runner.run_image(
+                image_path=image_path,
+                prompt=request.prompt,
+                confidence=request.confidence,
+                mode=request.mode,
+            )
+        except DartRunnerUnsupportedMode as error:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "DART_MODE_UNSUPPORTED",
+                    "message": f"Режим DART '{request.mode}' не поддерживается.",
+                    "details": {"mode": request.mode, "reason": str(error)},
+                },
+            ) from error
+        except DartRunnerTimeout as error:
+            logger.warning(
+                "DART preview timed out for dataset %s image %s: %s",
+                dataset_id,
+                request.image_id,
+                error,
+            )
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "code": "DART_PREVIEW_TIMEOUT",
+                    "message": "Время ожидания preview-запуска DART истекло.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                        "reason": str(error),
+                    },
+                },
+            ) from error
+        except Exception as error:
+            logger.exception(
+                "DART preview failed for dataset %s image %s",
+                dataset_id,
+                request.image_id,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "DART_PREVIEW_FAILED",
+                    "message": "Не удалось выполнить preview-запуск DART.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                        "reason": str(error),
+                    },
+                },
+            ) from error
+
+        normalized_result = run_result.normalized_result
+        if not isinstance(normalized_result, dict) or not isinstance(
+            normalized_result.get("objects", []), list
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "DART_PREVIEW_INVALID_RESULT",
+                    "message": "DART вернул некорректный нормализованный результат.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                    },
+                },
+            )
+
+        preview_path = workspace.previews_dir / f"{request.image_id}_preview.jpg"
+        preview_url = to_workspace_url(preview_path)
+        try:
+            rendered = PreviewRenderer().render(
+                image_path=image_path,
+                annotation=normalized_result,
+                output_path=preview_path,
+                preview_url=preview_url,
+            )
+        except Exception as error:
+            logger.exception(
+                "Preview rendering failed for dataset %s image %s",
+                dataset_id,
+                request.image_id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "PREVIEW_RENDER_FAILED",
+                    "message": "DART вернул результат, но создать preview-изображение не удалось.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                        "reason": str(error),
+                    },
+                },
+            ) from error
+
+        settings = make_dart_settings(request)
+        try:
+            workspace.save_preview_results(
+                request.image_id,
+                run_result.raw_result,
+                normalized_result,
+            )
+            workspace.save_dart_settings(settings)
+        except Exception as error:
+            logger.exception(
+                "Preview artifacts could not be saved for dataset %s image %s",
+                dataset_id,
+                request.image_id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "DART_PREVIEW_SAVE_FAILED",
+                    "message": "Не удалось сохранить результаты preview-запуска DART.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                    },
+                },
+            ) from error
+
+        objects_count = rendered["objects_count"]
+        return {
+            "status": "EMPTY" if objects_count == 0 else "OK",
+            "objects_count": objects_count,
+            "preview_url": rendered["preview_url"],
+            "result": normalized_result,
+        }
 
     def build_autolabel_status(
         *,
