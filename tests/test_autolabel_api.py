@@ -50,6 +50,11 @@ class FakeDartRunner:
         )
 
 
+class FailedPreviewRenderer:
+    def render(self, **kwargs):
+        raise RuntimeError("synthetic renderer failure")
+
+
 class AutolabelApiTest(unittest.TestCase):
     def test_autolabel_status_is_idle_before_start(self):
         with TemporaryDirectory() as temp_dir:
@@ -141,6 +146,33 @@ class AutolabelApiTest(unittest.TestCase):
             self.assertEqual(response.json()["autolabel"]["status"], "stopping")
             self.assertTrue(response.json()["autolabel"]["stop_requested"])
 
+    def test_autolabel_rejects_second_start_while_running(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = self.create_dataset(root)
+            running_status = {
+                "status": "running",
+                "total_images": 3,
+                "processed_images": 1,
+                "failed_images": 0,
+                "current_image_id": "image_000001",
+                "started_at": "2026-07-15T00:00:00Z",
+                "finished_at": None,
+                "stop_requested": False,
+            }
+            workspace.save_autolabel_status(running_status)
+
+            response = self.make_client(root).post(
+                "/api/datasets/ds_001/autolabel/start"
+            )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(
+                response.json()["detail"]["code"],
+                "AUTOLABEL_ALREADY_RUNNING",
+            )
+            self.assertEqual(workspace.load_autolabel_status(), running_status)
+
     def create_dataset(self, root, *, save_settings=True):
         workspace = DatasetWorkspace(root, "ds_001")
         workspace.create()
@@ -203,6 +235,26 @@ class AutolabelApiTest(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertEqual(errors[0].stage, "autolabel")
             self.assertEqual(errors[0].image_id, "image_000002")
+
+    def test_renderer_failure_does_not_count_image_as_annotated(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = self.create_dataset(root)
+            client = self.make_client(root)
+
+            with patch("backend.app.api.DartRunner", FakeDartRunner):
+                with patch("backend.app.api.PreviewRenderer", FailedPreviewRenderer):
+                    response = client.post("/api/datasets/ds_001/autolabel/start")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["annotated_images"], 0)
+            self.assertEqual(response.json()["failed_images"], 3)
+            self.assertEqual(workspace.load_annotations(), [])
+
+            status = workspace.load_autolabel_status()
+            self.assertEqual(status["total_images"], 3)
+            self.assertEqual(status["processed_images"], 3)
+            self.assertEqual(status["failed_images"], 3)
 
     def test_autolabel_requires_saved_dart_settings(self):
         with TemporaryDirectory() as temp_dir:

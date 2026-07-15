@@ -1,6 +1,10 @@
 from pydantic import BaseModel, Field, field_validator
 from typing import Literal
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 class Parameters(BaseModel):
     x: float
@@ -44,7 +48,7 @@ class Dataset(BaseModel):
     ]
     image_count: int
     images: list[ImageItem]
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=utc_now)
     warnings: list[str] = Field(default_factory=list)
 
 class DatasetError(BaseModel):
@@ -53,7 +57,7 @@ class DatasetError(BaseModel):
     filename: str | None = None
     message: str
     details: dict | list | str | None = None
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=utc_now)
 
     
 class DartSettingsRequest(BaseModel):
@@ -72,7 +76,7 @@ class DartSettingsRequest(BaseModel):
 
 
 class DartSettings(DartSettingsRequest):
-    updated_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class DartPreviewRequest(DartSettingsRequest):

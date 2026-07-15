@@ -1,9 +1,11 @@
 import logging
 import random
+from collections import defaultdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Lock
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from .cvat_export import export_cvat_yolo
 
@@ -38,6 +40,7 @@ logger.addHandler(logging.NullHandler())
 
 def create_api_router(workspace_root, dataset_limits):
     router = APIRouter(prefix="/api")
+    autolabel_start_locks = defaultdict(Lock)
 
     def dataset_dir(dataset_id):
         return workspace_root / "datasets" / dataset_id
@@ -405,7 +408,7 @@ def create_api_router(workspace_root, dataset_limits):
         )
 
     def now_iso():
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     def require_supported_dart_mode(mode):
         if mode not in DartRunner.supported_modes:
@@ -777,14 +780,29 @@ def create_api_router(workspace_root, dataset_limits):
         annotations = []
         autolabel_errors = []
 
-        started_at = now_iso()
-        workspace.save_autolabel_status(
-            build_autolabel_status(
-                status="running",
-                total_images=len(images),
-                started_at=started_at,
+        with autolabel_start_locks[dataset_id]:
+            current_status = workspace.load_autolabel_status()
+            if current_status.get("status") in {"running", "stopping"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "AUTOLABEL_ALREADY_RUNNING",
+                        "message": "Авторазметка этого датасета уже выполняется.",
+                        "details": {
+                            "dataset_id": dataset_id,
+                            "status": current_status.get("status"),
+                        },
+                    },
+                )
+
+            started_at = now_iso()
+            workspace.save_autolabel_status(
+                build_autolabel_status(
+                    status="running",
+                    total_images=len(images),
+                    started_at=started_at,
+                )
             )
-        )
         try:
             for image in images:
                 current_status = workspace.load_autolabel_status()
@@ -833,8 +851,6 @@ def create_api_router(workspace_root, dataset_limits):
                             "objects": result.normalized_result.get("objects", []),
                         }
                     )
-                    annotations.append(annotation)
-
                     if settings.show_overlay:
                         preview_path = workspace.previews_dir / f"{image_id}_preview.jpg"
                         preview_renderer.render(
@@ -843,6 +859,8 @@ def create_api_router(workspace_root, dataset_limits):
                             output_path=preview_path,
                             preview_url=to_workspace_url(preview_path),
                         )
+
+                    annotations.append(annotation)
 
                 except Exception as error:
                     logger.warning(

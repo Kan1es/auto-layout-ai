@@ -10,6 +10,7 @@ from PIL import Image
 
 from backend.app.api import create_api_router
 from backend.app.config import DatasetLimits
+from backend.app.cvat_export import _bbox_to_yolo_line
 from backend.app.json_read_write import write_json
 from backend.app.models import Dataset, ImageItem
 from backend.app.workspace_datasets import DatasetWorkspace
@@ -24,6 +25,36 @@ DATASET_LIMITS = DatasetLimits(
 
 
 class CvatExportApiTest(unittest.TestCase):
+    def test_rejects_bbox_outside_image_or_with_invalid_size(self):
+        invalid_boxes = [
+            {"x": -1, "y": 10, "width": 20, "height": 20},
+            {"x": 10, "y": -1, "width": 20, "height": 20},
+            {"x": 90, "y": 10, "width": 20, "height": 20},
+            {"x": 10, "y": 190, "width": 20, "height": 20},
+            {"x": 10, "y": 10, "width": 0, "height": 20},
+            {"x": 10, "y": 10, "width": 20, "height": -1},
+        ]
+
+        for bbox in invalid_boxes:
+            with self.subTest(bbox=bbox):
+                with self.assertRaises(ValueError):
+                    _bbox_to_yolo_line(
+                        class_id=0,
+                        bbox=bbox,
+                        image_width=100,
+                        image_height=200,
+                    )
+
+    def test_accepts_bbox_on_exact_image_boundary(self):
+        line = _bbox_to_yolo_line(
+            class_id=0,
+            bbox={"x": 0, "y": 0, "width": 100, "height": 200},
+            image_width=100,
+            image_height=200,
+        )
+
+        self.assertEqual(line, "0 0.500000 0.500000 1.000000 1.000000")
+
     def make_client(self, root):
         app = FastAPI()
         with patch.object(

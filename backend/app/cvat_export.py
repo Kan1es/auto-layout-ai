@@ -22,14 +22,15 @@ def _bbox_to_yolo_line(
     width = float(bbox["width"])
     height = float(bbox["height"])
 
+    if width <= 0 or height <= 0:
+        raise ValueError("Bbox width and height must be positive.")
+    if x < 0 or y < 0 or x + width > image_width or y + height > image_height:
+        raise ValueError("Bbox must stay within image boundaries.")
+
     x_center_norm = (x + width / 2) / image_width
     y_center_norm = (y + height / 2) / image_height
     width_norm = width / image_width
     height_norm = height / image_height
-
-    values = [x_center_norm, y_center_norm, width_norm, height_norm]
-    if any(value < 0 or value > 1 for value in values):
-        raise ValueError("Normalized bbox values must be in range 0..1.")
 
     return (
         f"{class_id} "

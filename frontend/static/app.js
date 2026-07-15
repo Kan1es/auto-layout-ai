@@ -528,7 +528,6 @@ async function dartPreview() {
   btn.textContent = "Запускаем DART…";
 
   try {
-    await apiPostJSON(`${API}/${state.datasetId}/dart/settings`, settings);
     const result = await apiPostJSON(`${API}/${state.datasetId}/dart/preview`, {
       image_id: imageId,
       ...settings,
@@ -591,9 +590,11 @@ async function autolabelStart() {
   el("autolabelStop").disabled = false;
   clearEl(el("autolabelErrors"));
   try {
-    await apiPostJSON(`${API}/${state.datasetId}/autolabel/start`);
+    const startRequest = apiPostJSON(`${API}/${state.datasetId}/autolabel/start`);
     pollAutolabelStatus();
+    await startRequest;
   } catch (e) {
+    clearInterval(state.autolabelPollTimer);
     showError(el("autolabelErrors"), `Не удалось запустить авторазметку: ${e.message}`);
     el("autolabelStart").disabled = false;
     el("autolabelStop").disabled = true;

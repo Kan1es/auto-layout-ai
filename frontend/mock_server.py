@@ -578,7 +578,7 @@ def h_cvat_export(handler, m, body):
     return 200, {
         "status": "OK",
         "format": fmt,
-        "archive_url": f"/media/{ds.id}/{path}",
+        "archive_url": path,
     }
 
 
