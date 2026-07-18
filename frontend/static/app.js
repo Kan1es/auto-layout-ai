@@ -25,7 +25,13 @@ async function apiFetch(path, opts = {}) {
     let msg = `HTTP ${res.status}`;
     try {
       const data = await res.json();
-      msg = getApiErrorMessage(data, msg);
+      if (data && data.error && data.error.message) {
+        msg = data.error.message;
+      } else if (data && typeof data.detail === "string") {
+        msg = data.detail;
+      } else if (data && data.detail && data.detail.message) {
+        msg = data.detail.message;
+      }
     } catch (_) {
       /* noop */
     }
@@ -34,13 +40,6 @@ async function apiFetch(path, opts = {}) {
   if (res.status === 204) return null;
   const text = await res.text();
   return text ? JSON.parse(text) : null;
-}
-
-function getApiErrorMessage(data, fallback) {
-  if (data?.error?.message) return data.error.message;
-  if (typeof data?.detail === "string") return data.detail;
-  if (data?.detail?.message) return data.detail.message;
-  return fallback;
 }
 
 function apiPostJSON(path, body) {
@@ -152,7 +151,10 @@ function goToScreen(id) {
   });
   renderRail();
   if (id === "stats") loadStats();
-  if (id === "dart") populatePreviewImageSelect();
+  if (id === "dart") {
+    populatePreviewImageSelect();
+    loadDartSettings();
+  }
 }
 
 function initUploadScreen() {
@@ -219,7 +221,13 @@ function uploadZip(file) {
       let msg = `HTTP ${xhr.status}`;
       try {
         const data = JSON.parse(xhr.responseText);
-        msg = getApiErrorMessage(data, msg);
+        if (data.error && data.error.message) {
+          msg = data.error.message;
+        } else if (typeof data.detail === "string") {
+          msg = data.detail;
+        } else if (data.detail && data.detail.message) {
+          msg = data.detail.message;
+        }
       } catch (_) {
         /* noop */
       }
@@ -234,7 +242,14 @@ function uploadZip(file) {
       /* noop */
     }
     const dataset = data.dataset || data;
-    state.datasetId = dataset.id || data.dataset_id;
+    state.datasetId = dataset.id || dataset.dataset_id;
+    if (!state.datasetId) {
+      showError(el("uploadError"), "Backend не вернул идентификатор датасета");
+      progressWrap.hidden = true;
+      return;
+    }
+    state.approvedImages = [];
+    state.currentFrameId = null;
     text.textContent = `Готово: ${dataset.image_count ?? "?"} изображений`;
     bar.style.width = "100%";
     unlock("stats");
@@ -256,10 +271,7 @@ async function loadStats() {
   showEmpty(body, "Загружаем статистику…");
   try {
     const response = await apiFetch(`${API}/${state.datasetId}/stats`);
-    renderStats({
-      ...(response.stats || response),
-      warnings: response.warnings || response.stats?.warnings || [],
-    });
+    renderStats({ ...response.stats, warnings: response.warnings || [] });
     unlock("select");
     el("toSelect").disabled = false;
     renderRail();
@@ -272,7 +284,7 @@ function renderStats(stats) {
   const body = el("statsBody");
   clearEl(body);
 
-  const extensions = stats.extensions || stats.formats || {};
+  const extensions = stats.extensions || {};
   const warnings = stats.warnings || [];
 
   const tiles = [
@@ -290,7 +302,7 @@ function renderStats(stats) {
       label: "макс. разрешение",
     },
     {
-      num: stats.common_resolutions?.[0]?.resolution
+      num: stats.common_resolutions && stats.common_resolutions.length
         ? stats.common_resolutions[0].resolution
         : "—",
       label: "частое разрешение",
@@ -345,11 +357,11 @@ async function repInit() {
   const n = parseInt(el("repN").value, 10) || 1;
   el("approvedTarget").textContent = n;
   try {
-    await apiPostJSON(`${API}/${state.datasetId}/representative/init`, {
+    const data = await apiPostJSON(`${API}/${state.datasetId}/representative/init`, {
       target_count: n,
     });
     el("repCard").hidden = false;
-    await refreshCurrentFrame();
+    renderFrame(data);
   } catch (e) {
     showError(el("repCard"), `Не удалось начать отбор: ${e.message}`);
     el("repCard").hidden = false;
@@ -367,7 +379,7 @@ async function refreshCurrentFrame() {
 }
 
 function renderFrame(data) {
-  const img = data.current_image || data.image || {};
+  const img = data.current_image || {};
   const imageEl = el("frameImage");
   const placeholder = el("framePlaceholder");
   const safeSrc = safeHttpUrl(img.url);
@@ -403,26 +415,32 @@ function renderFrame(data) {
   el("approvedCount").textContent = data.approved_count ?? state.approvedImages.length;
   if (data.target_count) el("approvedTarget").textContent = data.target_count;
 
-  state.currentFrameId = img.id;
-  el("framePrev").disabled = !data.can_go_prev;
-  el("frameNext").disabled = !data.can_go_next;
+  state.currentFrameId = img.id || null;
+  const approvedIds = data.approved_image_ids || [];
+  state.approvedImages = approvedIds.map((imageId) => {
+    const previous = state.approvedImages.find((item) => item.id === imageId);
+    const filename = imageId === img.id ? img.filename : previous && previous.filename;
+    return { id: imageId, filename: filename || imageId };
+  });
 
   const approvedCount = data.approved_count ?? 0;
-  el("toDart").disabled = approvedCount < 1;
-  if (approvedCount >= 1) unlock("dart");
+  el("framePrev").disabled = !data.can_go_prev;
+  el("frameNext").disabled = !data.can_go_next;
+  el("toDart").disabled = !data.completed;
+  if (data.completed) unlock("dart");
   renderRail();
 }
 
 async function frameApprove() {
   if (!state.currentFrameId) return;
+  const imageId = state.currentFrameId;
+  const filename = el("frameFilename").textContent;
   try {
-    const data = await apiPostJSON(`${API}/${state.datasetId}/representative/approve`, {
-      image_id: state.currentFrameId,
-    });
+    const data = await apiPostJSON(`${API}/${state.datasetId}/representative/approve`);
     renderFrame(data);
-    const filename = el("frameFilename").textContent;
-    if (!state.approvedImages.find((i) => i.id === state.currentFrameId)) {
-      state.approvedImages.push({ id: state.currentFrameId, filename });
+    const approved = state.approvedImages.find((item) => item.id === imageId);
+    if (approved) {
+      approved.filename = filename;
     }
   } catch (e) {
     showError(el("repCard"), `Не удалось одобрить кадр: ${e.message}`);
@@ -432,11 +450,8 @@ async function frameApprove() {
 async function frameUnapprove() {
   if (!state.currentFrameId) return;
   try {
-    const data = await apiPostJSON(`${API}/${state.datasetId}/representative/unapprove`, {
-      image_id: state.currentFrameId,
-    });
+    const data = await apiPostJSON(`${API}/${state.datasetId}/representative/unapprove`);
     renderFrame(data);
-    state.approvedImages = state.approvedImages.filter((i) => i.id !== state.currentFrameId);
   } catch (e) {
     showError(el("repCard"), `Не удалось снять отбор: ${e.message}`);
   }
@@ -480,6 +495,22 @@ function dartCurrentSettings() {
   };
 }
 
+async function loadDartSettings() {
+  if (!state.datasetId) return;
+  try {
+    const settings = await apiFetch(`${API}/${state.datasetId}/dart/settings`);
+    el("dartPrompt").value = settings.prompt || "";
+    el("dartConfidence").value = settings.confidence ?? 0.35;
+    el("dartConfidenceVal").textContent = Number(
+      settings.confidence ?? 0.35
+    ).toFixed(2);
+    el("dartMode").value = settings.mode === "bbox" ? settings.mode : "bbox";
+    el("dartOverlay").checked = settings.show_overlay !== false;
+  } catch (e) {
+    showError(el("previewObjects"), `Не удалось загрузить настройки DART: ${e.message}`);
+  }
+}
+
 async function dartPreview() {
   const imageId = el("dartPreviewImage").value;
   if (!imageId) {
@@ -497,13 +528,13 @@ async function dartPreview() {
   btn.textContent = "Запускаем DART…";
 
   try {
-    await apiPostJSON(`${API}/${state.datasetId}/dart/settings`, settings);
     const result = await apiPostJSON(`${API}/${state.datasetId}/dart/preview`, {
       image_id: imageId,
       ...settings,
     });
     renderDartPreview(result);
     unlock("autolabel");
+    el("toAutolabel").disabled = false;
     renderRail();
   } catch (e) {
     showError(el("previewObjects"), `DART preview не удался: ${e.message}`);
@@ -559,9 +590,11 @@ async function autolabelStart() {
   el("autolabelStop").disabled = false;
   clearEl(el("autolabelErrors"));
   try {
-    await apiPostJSON(`${API}/${state.datasetId}/autolabel/start`);
+    const startRequest = apiPostJSON(`${API}/${state.datasetId}/autolabel/start`);
     pollAutolabelStatus();
+    await startRequest;
   } catch (e) {
+    clearInterval(state.autolabelPollTimer);
     showError(el("autolabelErrors"), `Не удалось запустить авторазметку: ${e.message}`);
     el("autolabelStart").disabled = false;
     el("autolabelStop").disabled = true;
@@ -582,11 +615,11 @@ function pollAutolabelStatus() {
     try {
       const data = await apiFetch(`${API}/${state.datasetId}/autolabel/status`);
       renderAutolabelStatus(data);
-      if (data.status === "done" || data.status === "stopped") {
+      if (["completed", "failed", "stopped"].includes(data.status)) {
         clearInterval(state.autolabelPollTimer);
         el("autolabelStart").disabled = false;
         el("autolabelStop").disabled = true;
-        if (data.status === "done") {
+        if (data.status === "completed") {
           unlock("export");
           el("toExport").disabled = false;
           renderRail();
@@ -602,7 +635,10 @@ function pollAutolabelStatus() {
 }
 
 function renderAutolabelStatus(data) {
-  const progress = data.progress || { done: 0, total: 0 };
+  const progress = {
+    done: data.processed_images ?? 0,
+    total: data.total_images ?? 0,
+  };
   const pct = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
   el("autolabelProgressBar").style.width = `${pct}%`;
   el("autolabelProgressText").textContent = `${progress.done} / ${progress.total}`;
@@ -610,7 +646,17 @@ function renderAutolabelStatus(data) {
   const errors = data.errors || [];
   const container = el("autolabelErrors");
   clearEl(container);
-  if (!errors.length) return;
+  if (!errors.length) {
+    if ((data.failed_images || 0) > 0) {
+      container.appendChild(
+        makeEl("div", {
+          className: "hint",
+          text: `Ошибок обработки: ${data.failed_images}. Подробности доступны в результатах.`,
+        })
+      );
+    }
+    return;
+  }
 
   container.appendChild(
     makeEl("h3", {
@@ -637,45 +683,35 @@ async function exportBuild() {
     const data = await apiPostJSON(`${API}/${state.datasetId}/cvat/export`, { format });
     clearEl(status);
     status.appendChild(makeEl("div", { className: "pill approved", text: "Экспорт готов" }));
+    const archiveUrl = safeHttpUrl(data.archive_url);
+    const row = makeEl("div", { className: "link-row", attrs: { style: "margin-top:10px;" } });
+    row.appendChild(makeEl("span", { text: "YOLO-архив" }));
+    if (archiveUrl) {
+      row.appendChild(
+        makeEl("a", {
+          text: "Открыть архив",
+          attrs: { href: archiveUrl, target: "_blank", rel: "noopener" },
+        })
+      );
+    }
+    status.appendChild(row);
     status.appendChild(
       makeEl("div", {
         className: "hint",
         attrs: { style: "margin-top:8px;" },
-        text: data.path || data.export_path || "",
+        text: "Импортируйте архив вручную в локальный CVAT.",
       })
     );
     el("exportImport").disabled = false;
+    unlock("results");
+    renderRail();
   } catch (e) {
     showError(status, `Не удалось подготовить экспорт: ${e.message}`);
   }
 }
 
 async function exportImport() {
-  const status = el("exportStatus");
-  try {
-    const data = await apiPostJSON(`${API}/${state.datasetId}/cvat/import`);
-
-    const row = makeEl("div", { className: "link-row", attrs: { style: "margin-top:10px;" } });
-    row.appendChild(makeEl("span", { text: "Задача создана в CVAT" }));
-
-    const safeTaskUrl = safeHttpUrl(data.task_url);
-    if (safeTaskUrl) {
-      row.appendChild(
-        makeEl("a", {
-          text: safeTaskUrl,
-          attrs: { href: safeTaskUrl, target: "_blank", rel: "noopener" },
-        })
-      );
-    } else {
-      row.appendChild(makeEl("span", { text: `task id: ${data.task_id || "?"}` }));
-    }
-
-    status.appendChild(row);
-    unlock("results");
-    renderRail();
-  } catch (e) {
-    showError(status, `Импорт в CVAT не удался: ${e.message}`);
-  }
+  window.open("http://localhost:8080", "_blank", "noopener");
 }
 
 async function loadResults() {
@@ -697,8 +733,7 @@ function renderResults(data, links, previews, errorsBox) {
   const fileEntries = [
     ["Аннотации (internal JSON)", data.annotations_url || data.annotations_json_url],
     ["Ошибки (errors.json)", data.errors_url || data.errors_json_url],
-    ["CVAT export — YOLO", data.cvat_export && data.cvat_export.yolo_url],
-    ["CVAT export — COCO", data.cvat_export && data.cvat_export.coco_url],
+    ["CVAT export — YOLO", data.cvat_export && data.cvat_export.archive_url],
   ].filter(([, url]) => !!url);
 
   if (fileEntries.length) {

@@ -1,6 +1,10 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 class Parameters(BaseModel):
     x: float
@@ -8,11 +12,21 @@ class Parameters(BaseModel):
     width: float
     height: float
 
+class InternalImage(BaseModel):
+    id: str
+    filename: str
+    width: int
+    height: int
+
 class AnnotationObj(BaseModel):
     label: str
     confidence: float
     bbox: Parameters | None
     mask: dict | list | None
+
+class InternalAnnotation(BaseModel):
+    image: InternalImage
+    objects: list[AnnotationObj] = Field(default_factory=list)
 
 class ImageItem(BaseModel):
     id: str
@@ -34,7 +48,7 @@ class Dataset(BaseModel):
     ]
     image_count: int
     images: list[ImageItem]
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=utc_now)
     warnings: list[str] = Field(default_factory=list)
 
 class DatasetError(BaseModel):
@@ -43,20 +57,42 @@ class DatasetError(BaseModel):
     filename: str | None = None
     message: str
     details: dict | list | str | None = None
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=utc_now)
 
     
-class DartSettings(BaseModel):
+class DartSettingsRequest(BaseModel):
     prompt: str
-    confidence: float
+    confidence: float = Field(ge=0, le=1)
     mode: Literal["bbox", "mask", "bbox_and_mask"]
-    show_overlay: bool
-    updated_at: datetime = Field(default_factory=datetime.now)
+    show_overlay: bool = True
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Prompt не должен быть пустым.")
+        return value
+
+
+class DartSettings(DartSettingsRequest):
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class DartPreviewRequest(DartSettingsRequest):
+    image_id: str
+
+    @field_validator("image_id")
+    @classmethod
+    def validate_image_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Идентификатор изображения не должен быть пустым.")
+        return value
 
 class Annotation(BaseModel):
     image_id: str
     objects: list[AnnotationObj]
-
 
 
 class RepresentativeInitRequest(BaseModel):
@@ -83,9 +119,13 @@ class RepresentativeStateResponse(BaseModel):
     dataset_id: str
     target_count: int
     approved_count: int
+    approved_image_ids: list[str]
     viewed_count: int
     total_count: int
     current_image: RepresentativeImageResponse | None
     can_go_prev: bool
     can_go_next: bool
     completed: bool
+
+class CvatExportRequest(BaseModel):
+    format: Literal["yolo", "coco"] = "yolo"

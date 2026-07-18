@@ -1,25 +1,35 @@
-from datetime import datetime
 import logging
-from pathlib import Path
 import random
-import shutil
+from collections import defaultdict
+from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Lock
 from uuid import uuid4
-
+from datetime import datetime, timezone
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from .cvat_export import export_cvat_yolo
 
 from .dataset_zip_importer import import_dataset_zip
-from .dart_runner import DartRunner
+from .dart_runner import (
+    DartRunner,
+    DartRunnerTimeout,
+    DartRunnerUnsupportedMode,
+)
 from .errors import DatasetImportError
 from .image_stats import calculate_dataset_stats
 from .json_read_write import read_json, write_json
+from .preview_renderer import PreviewRenderer
 from .models import (
     Annotation,
+    DartPreviewRequest,
+    DartSettings,
+    DartSettingsRequest,
     DatasetError,
     RepresentativeImageResponse,
     RepresentativeInitRequest,
     RepresentativeState,
     RepresentativeStateResponse,
+    CvatExportRequest
 )
 from .workspace_datasets import DatasetWorkspace
 
@@ -30,6 +40,7 @@ logger.addHandler(logging.NullHandler())
 
 def create_api_router(workspace_root, dataset_limits):
     router = APIRouter(prefix="/api")
+    autolabel_start_locks = defaultdict(Lock)
 
     def dataset_dir(dataset_id):
         return workspace_root / "datasets" / dataset_id
@@ -294,6 +305,7 @@ def create_api_router(workspace_root, dataset_limits):
             dataset_id=dataset_id,
             target_count=state.target_count,
             approved_count=len(state.approved_image_ids),
+            approved_image_ids=state.approved_image_ids,
             viewed_count=len(state.history),
             total_count=len(images),
             current_image=current_image,
@@ -308,21 +320,420 @@ def create_api_router(workspace_root, dataset_limits):
         root = dataset_dir(dataset_id)
         results_dir = root / "results"
         annotations_path = results_dir / "annotations_internal.json"
+        previews_dir = results_dir / "previews"
+        yolo_archive_path = root / "cvat_export" / "yolo_export.zip"
+        yolo_folder_path = root / "cvat_export" / "yolo"
         annotations = (
             read_json(annotations_path).get("annotations", [])
             if annotations_path.exists()
             else []
         )
         errors = load_dataset_errors(dataset_id)
+        previews = (
+            [
+                to_workspace_url(path)
+                for path in sorted(previews_dir.iterdir())
+                if path.is_file()
+            ]
+            if previews_dir.exists()
+            else []
+        )
+        cvat_export = (
+            {
+                "status": "ready",
+                "format": "yolo",
+                "archive_url": to_workspace_url(yolo_archive_path),
+                "folder_url": to_workspace_url(yolo_folder_path),
+            }
+            if yolo_archive_path.exists()
+            else {"status": "not_created"}
+        )
         return {
             "dataset_id": dataset_id,
             "annotations": annotations,
             "errors": errors,
             "annotations_url": to_workspace_url(results_dir / "annotations_internal.json"),
             "errors_url": to_workspace_url(results_dir / "errors.json"),
-            "previews_url": to_workspace_url(results_dir / "previews"),
-            "dart": {"status": "stub"},
-            "cvat": {"status": "stub"},
+            "previews": previews,
+            "previews_url": to_workspace_url(previews_dir),
+            "cvat_export": cvat_export,
+        }
+
+    @router.post("/datasets/{dataset_id}/cvat/export")
+    def export_cvat(dataset_id: str, request: CvatExportRequest | None = None):
+        metadata = load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+        request = request or CvatExportRequest()
+
+        if request.format == "coco":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "CVAT_EXPORT_FORMAT_NOT_SUPPORTED",
+                    "message": "COCO export is not available yet. Use YOLO format.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "format": request.format,
+                        "supported_formats": ["yolo"],
+                    },
+                },
+            )
+
+        if not workspace.annotations_path.exists():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ANNOTATIONS_NOT_FOUND",
+                    "message": "annotations_internal.json was not found.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            )
+
+        annotations_data = read_json(workspace.annotations_path)
+        if not annotations_data.get("annotations"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ANNOTATIONS_EMPTY",
+                    "message": "annotations_internal.json does not contain annotations.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            )
+
+        return export_cvat_yolo(
+            dataset_dir=workspace.dataset_dir,
+            workspace_root=workspace_root,
+            metadata=metadata,
+            annotations_data=annotations_data,
+        )
+
+    def now_iso():
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def require_supported_dart_mode(mode):
+        if mode not in DartRunner.supported_modes:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "DART_MODE_UNSUPPORTED",
+                    "message": f"Режим DART '{mode}' не поддерживается.",
+                    "details": {
+                        "mode": mode,
+                        "supported_modes": sorted(DartRunner.supported_modes),
+                    },
+                },
+            )
+
+    def make_dart_settings(request):
+        return DartSettings(
+            prompt=request.prompt,
+            confidence=request.confidence,
+            mode=request.mode,
+            show_overlay=request.show_overlay,
+        )
+
+    @router.get("/datasets/{dataset_id}/dart/settings")
+    def get_dart_settings(dataset_id: str):
+        load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+
+        if not workspace.dart_settings_path.exists():
+            return {
+                "prompt": "",
+                "confidence": 0.35,
+                "mode": "bbox",
+                "show_overlay": True,
+                "updated_at": None,
+            }
+
+        try:
+            return workspace.load_dart_settings().model_dump(mode="json")
+        except Exception as error:
+            logger.warning(
+                "Dataset %s has invalid DART settings: %s", dataset_id, error
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DART_SETTINGS_INVALID",
+                    "message": "Сохранённые настройки DART некорректны.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            ) from error
+
+    @router.post("/datasets/{dataset_id}/dart/settings")
+    def save_dart_settings(dataset_id: str, request: DartSettingsRequest):
+        load_metadata(dataset_id)
+        require_supported_dart_mode(request.mode)
+
+        settings = make_dart_settings(request)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+        workspace.save_dart_settings(settings)
+        return settings.model_dump(mode="json")
+
+    @router.post("/datasets/{dataset_id}/dart/preview")
+    def run_dart_preview(dataset_id: str, request: DartPreviewRequest):
+        metadata = load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+
+        if not workspace.representative_path.exists():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "REPRESENTATIVE_NOT_INITIALIZED",
+                    "message": "Отбор репрезентативных изображений не инициализирован.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            )
+
+        image = next(
+            (
+                item
+                for item in metadata.get("images", [])
+                if item.get("id") == request.image_id
+            ),
+            None,
+        )
+        if image is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "IMAGE_NOT_FOUND",
+                    "message": "Изображение не найдено в датасете.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                    },
+                },
+            )
+        if not image.get("readable", True):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMAGE_NOT_READABLE",
+                    "message": "Изображение невозможно прочитать и использовать для preview.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                    },
+                },
+            )
+
+        try:
+            representative = workspace.load_representative_state()
+        except Exception as error:
+            logger.warning(
+                "Dataset %s has invalid representative state: %s", dataset_id, error
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "REPRESENTATIVE_STATE_INVALID",
+                    "message": "Сохранённое состояние отбора репрезентативных изображений некорректно.",
+                    "details": {"dataset_id": dataset_id},
+                },
+            ) from error
+
+        if request.image_id not in representative.approved_image_ids:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IMAGE_NOT_APPROVED",
+                    "message": "Preview можно запускать только для подтверждённых репрезентативных изображений.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                    },
+                },
+            )
+
+        require_supported_dart_mode(request.mode)
+        image_path = dataset_dir(dataset_id) / image.get("path", "")
+        runner = DartRunner(output_root=workspace.results_dir / "dart_runs")
+
+        try:
+            run_result = runner.run_image(
+                image_path=image_path,
+                prompt=request.prompt,
+                confidence=request.confidence,
+                mode=request.mode,
+            )
+        except DartRunnerUnsupportedMode as error:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "DART_MODE_UNSUPPORTED",
+                    "message": f"Режим DART '{request.mode}' не поддерживается.",
+                    "details": {"mode": request.mode, "reason": str(error)},
+                },
+            ) from error
+        except DartRunnerTimeout as error:
+            logger.warning(
+                "DART preview timed out for dataset %s image %s: %s",
+                dataset_id,
+                request.image_id,
+                error,
+            )
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "code": "DART_PREVIEW_TIMEOUT",
+                    "message": "Время ожидания preview-запуска DART истекло.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                        "reason": str(error),
+                    },
+                },
+            ) from error
+        except Exception as error:
+            logger.exception(
+                "DART preview failed for dataset %s image %s",
+                dataset_id,
+                request.image_id,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "DART_PREVIEW_FAILED",
+                    "message": "Не удалось выполнить preview-запуск DART.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                        "reason": str(error),
+                    },
+                },
+            ) from error
+
+        normalized_result = run_result.normalized_result
+        if not isinstance(normalized_result, dict) or not isinstance(
+            normalized_result.get("objects", []), list
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "DART_PREVIEW_INVALID_RESULT",
+                    "message": "DART вернул некорректный нормализованный результат.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                    },
+                },
+            )
+
+        preview_path = workspace.previews_dir / f"{request.image_id}_preview.jpg"
+        preview_url = to_workspace_url(preview_path)
+        try:
+            rendered = PreviewRenderer().render(
+                image_path=image_path,
+                annotation=normalized_result,
+                output_path=preview_path,
+                preview_url=preview_url,
+            )
+        except Exception as error:
+            logger.exception(
+                "Preview rendering failed for dataset %s image %s",
+                dataset_id,
+                request.image_id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "PREVIEW_RENDER_FAILED",
+                    "message": "DART вернул результат, но создать preview-изображение не удалось.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                        "reason": str(error),
+                    },
+                },
+            ) from error
+
+        settings = make_dart_settings(request)
+        try:
+            workspace.save_preview_results(
+                request.image_id,
+                run_result.raw_result,
+                normalized_result,
+            )
+            workspace.save_dart_settings(settings)
+        except Exception as error:
+            logger.exception(
+                "Preview artifacts could not be saved for dataset %s image %s",
+                dataset_id,
+                request.image_id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "DART_PREVIEW_SAVE_FAILED",
+                    "message": "Не удалось сохранить результаты preview-запуска DART.",
+                    "details": {
+                        "dataset_id": dataset_id,
+                        "image_id": request.image_id,
+                    },
+                },
+            ) from error
+
+        objects_count = rendered["objects_count"]
+        return {
+            "status": "EMPTY" if objects_count == 0 else "OK",
+            "objects_count": objects_count,
+            "preview_url": rendered["preview_url"],
+            "result": normalized_result,
+        }
+
+    def build_autolabel_status(
+        *,
+        status,
+        total_images,
+        processed_images=0,
+        failed_images=0,
+        current_image_id=None,
+        started_at=None,
+        finished_at=None,
+        stop_requested=False,
+    ):
+        return {
+            "status": status,
+            "total_images": total_images,
+            "processed_images": processed_images,
+            "failed_images": failed_images,
+            "current_image_id": current_image_id,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "stop_requested": stop_requested,
+        }
+
+    @router.get("/datasets/{dataset_id}/autolabel/status")
+    def get_autolabel_status(dataset_id: str):
+        load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+        return workspace.load_autolabel_status()
+
+    @router.post("/datasets/{dataset_id}/autolabel/stop")
+    def stop_autolabel(dataset_id: str):
+        load_metadata(dataset_id)
+        workspace = DatasetWorkspace(workspace_root, dataset_id)
+        status = workspace.load_autolabel_status()
+
+        if status.get("status") not in ["running", "stopping"]:
+            return {
+                "status": "not_running",
+                "dataset_id": dataset_id,
+                "message": "Autolabeling is not running.",
+                "autolabel": status,
+            }
+
+        status["status"] = "stopping"
+        status["stop_requested"] = True
+        workspace.save_autolabel_status(status)
+
+        return {
+            "status": "stopping",
+            "dataset_id": dataset_id,
+            "message": "Stop request has been saved. Autolabeling will stop between images.",
+            "autolabel": status,
         }
 
     @router.post("/datasets/{dataset_id}/autolabel/start")
@@ -365,60 +776,158 @@ def create_api_router(workspace_root, dataset_limits):
 
         images = metadata.get("images", [])
         runner = DartRunner(output_root=workspace.results_dir / "dart_runs")
+        preview_renderer = PreviewRenderer()
         annotations = []
         autolabel_errors = []
 
-        for image in images:
-            image_id = image.get("id")
-            filename = image.get("filename")
-            image_path = dataset_dir(dataset_id) / image.get("path", "")
-
-            try:
-                result = runner.run_image(
-                    image_path=image_path,
-                    prompt=settings.prompt,
-                    confidence=settings.confidence,
-                    mode=settings.mode,
+        with autolabel_start_locks[dataset_id]:
+            current_status = workspace.load_autolabel_status()
+            if current_status.get("status") in {"running", "stopping"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "AUTOLABEL_ALREADY_RUNNING",
+                        "message": "Авторазметка этого датасета уже выполняется.",
+                        "details": {
+                            "dataset_id": dataset_id,
+                            "status": current_status.get("status"),
+                        },
+                    },
                 )
-                workspace.save_raw_result(image_id, result.raw_result)
 
-                annotation = Annotation.model_validate(
-                    {
-                        "image_id": image_id,
-                        "objects": result.normalized_result.get("objects", []),
-                    }
+            started_at = now_iso()
+            workspace.save_autolabel_status(
+                build_autolabel_status(
+                    status="running",
+                    total_images=len(images),
+                    started_at=started_at,
                 )
-                annotations.append(annotation)
+            )
+        try:
+            for image in images:
+                current_status = workspace.load_autolabel_status()
+                if current_status.get("stop_requested"):
+                    workspace.save_autolabel_status(
+                        build_autolabel_status(
+                            status="stopped",
+                            total_images=len(images),
+                            processed_images=len(annotations) + len(autolabel_errors),
+                            failed_images=len(autolabel_errors),
+                            current_image_id=None,
+                            started_at=started_at,
+                            finished_at=now_iso(),
+                            stop_requested=True,
+                        )
+                    )
+                    break
 
-                if settings.show_overlay and result.preview_path:
-                    preview_path = workspace.previews_dir / f"{image_id}_preview.jpg"
-                    shutil.copy2(result.preview_path, preview_path)
-            except Exception as error:
-                logger.warning(
-                    "Autolabeling failed for dataset %s image %s: %s",
-                    dataset_id,
-                    image_id,
-                    error,
-                )
-                autolabel_errors.append(
-                    DatasetError(
-                        stage="autolabel",
-                        image_id=image_id,
-                        filename=filename,
-                        message=str(error),
-                        details={"exception_type": type(error).__name__},
+                image_id = image.get("id")
+                filename = image.get("filename")
+                image_path = dataset_dir(dataset_id) / image.get("path", "")
+
+                workspace.save_autolabel_status(
+                    build_autolabel_status(
+                        status="running",
+                        total_images=len(images),
+                        processed_images=len(annotations) + len(autolabel_errors),
+                        failed_images=len(autolabel_errors),
+                        current_image_id=image_id,
+                        started_at=started_at,
                     )
                 )
 
-        workspace.save_annotations(annotations)
-        all_errors = replace_stage_errors(
-            dataset_id,
-            "autolabel",
-            [error.model_dump(mode="json") for error in autolabel_errors],
-        )
+                try:
+                    result = runner.run_image(
+                        image_path=image_path,
+                        prompt=settings.prompt,
+                        confidence=settings.confidence,
+                        mode=settings.mode,
+                    )
+                    workspace.save_raw_result(image_id, result.raw_result)
+
+                    annotation = Annotation.model_validate(
+                        {
+                            "image_id": image_id,
+                            "objects": result.normalized_result.get("objects", []),
+                        }
+                    )
+                    if settings.show_overlay:
+                        preview_path = workspace.previews_dir / f"{image_id}_preview.jpg"
+                        preview_renderer.render(
+                            image_path=image_path,
+                            annotation=annotation,
+                            output_path=preview_path,
+                            preview_url=to_workspace_url(preview_path),
+                        )
+
+                    annotations.append(annotation)
+
+                except Exception as error:
+                    logger.warning(
+                        "Autolabeling failed for dataset %s image %s: %s",
+                        dataset_id,
+                        image_id,
+                        error,
+                    )
+                    autolabel_errors.append(
+                        DatasetError(
+                            stage="autolabel",
+                            image_id=image_id,
+                            filename=filename,
+                            message=str(error),
+                            details={"exception_type": type(error).__name__},
+                        )
+                    )
+
+                workspace.save_autolabel_status(
+                    build_autolabel_status(
+                        status="running",
+                        total_images=len(images),
+                        processed_images=len(annotations) + len(autolabel_errors),
+                        failed_images=len(autolabel_errors),
+                        current_image_id=image_id,
+                        started_at=started_at,
+                    )
+                )
+
+            workspace.save_annotations(annotations)
+            all_errors = replace_stage_errors(
+                dataset_id,
+                "autolabel",
+                [error.model_dump(mode="json") for error in autolabel_errors],
+            )
+
+        except Exception:
+            workspace.save_autolabel_status(
+                build_autolabel_status(
+                    status="failed",
+                    total_images=len(images),
+                    processed_images=len(annotations) + len(autolabel_errors),
+                    failed_images=len(autolabel_errors),
+                    current_image_id=None,
+                    started_at=started_at,
+                    finished_at=now_iso(),
+                    stop_requested=False,
+                )
+            )
+            raise
+
+        final_status = workspace.load_autolabel_status()
+        if final_status.get("status") != "stopped":
+            final_status = build_autolabel_status(
+                status="completed",
+                total_images=len(images),
+                processed_images=len(annotations) + len(autolabel_errors),
+                failed_images=len(autolabel_errors),
+                current_image_id=None,
+                started_at=started_at,
+                finished_at=now_iso(),
+                stop_requested=False,
+            )
+            workspace.save_autolabel_status(final_status)
 
         return {
-            "status": "completed",
+            "status": final_status["status"],
             "dataset_id": dataset_id,
             "total_images": len(images),
             "annotated_images": len(annotations),
@@ -469,11 +978,16 @@ def create_api_router(workspace_root, dataset_limits):
         if len(image_ids) <= request.target_count:
             state = RepresentativeState(
                 target_count=request.target_count,
-                approved_image_ids=image_ids
+                history=image_ids,
+                current_index=0,
+                approved_image_ids=image_ids,
             )
         else:
+            first_image_id = random.choice(image_ids)
             state = RepresentativeState(
-                target_count=request.target_count
+                target_count=request.target_count,
+                history=[first_image_id],
+                current_index=0,
             )
         workspace = DatasetWorkspace(
             workspace_root,

@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 from pydantic import BaseModel
 from pathlib import Path
 
@@ -32,6 +34,7 @@ def read_json(path):
 
 def write_json(path, data):
     path = Path(path)
+    temp_path = None
     try:
         path.parent.mkdir(
             parents = True,
@@ -40,15 +43,32 @@ def write_json(path, data):
         if isinstance(data, BaseModel):
             data = data.model_dump(mode = "json")
 
-        with path.open("w", encoding="utf-8") as file:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as file:
+            temp_path = Path(file.name)
             json.dump(
                 data,
                 file,
                 ensure_ascii = False,
                 indent = 2
             )
+            file.flush()
+            os.fsync(file.fileno())
+
+        os.replace(temp_path, path)
 
     except (OSError, TypeError, ValueError) as error:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise JsonWriteError(
             path,
             error

@@ -210,7 +210,8 @@ def compute_stats(ds):
     if len(exts) > 1:
         warnings.append("Датасет содержит смешанные форматы: " + ", ".join(sorted(exts)) + ".")
 
-    min_res = max_res = common_res = None
+    min_res = max_res = None
+    common_resolutions = []
     if widths:
         pairs = list(zip(widths, heights))
         mw, mh = min(pairs, key=lambda p: p[0] * p[1])
@@ -219,32 +220,60 @@ def compute_stats(ds):
         max_res = {"width": Mw, "height": Mh}
         common_key = max(res_counter, key=res_counter.get)
         cw, ch = common_key.split("x")
-        common_res = {"width": int(cw), "height": int(ch)}
+        common_resolutions = [
+            {"resolution": common_key, "count": res_counter[common_key]}
+        ]
 
     return {
         "image_count": len(images),
+        "readable_image_count": len(images) - unreadable,
+        "unreadable_image_count": unreadable,
         "extensions": exts,
-        "min_resolution": min_res,
-        "max_resolution": max_res,
-        "common_resolution": common_res,
+        "min_size": min_res,
+        "max_size": max_res,
+        "common_resolutions": common_resolutions,
+        "warnings_count": len(warnings),
         "warnings": warnings,
     }
 
 
 def frame_response(ds):
     if not ds.rep["pool"]:
-        return {"image": {}, "approved_count": 0, "target_n": ds.rep["n"]}
+        return {
+            "dataset_id": ds.id,
+            "target_count": ds.rep["n"],
+            "approved_count": 0,
+            "approved_image_ids": [],
+            "viewed_count": 0,
+            "total_count": len(ds.images),
+            "current_image": None,
+            "can_go_prev": False,
+            "can_go_next": False,
+            "completed": False,
+        }
     image_id = ds.rep["pool"][ds.rep["index"]]
     img = ds.image_by_id(image_id)
     return {
-        "image": {
+        "dataset_id": ds.id,
+        "target_count": ds.rep["n"],
+        "approved_count": len(ds.rep["approved"]),
+        "approved_image_ids": sorted(ds.rep["approved"]),
+        "viewed_count": ds.rep["index"] + 1,
+        "total_count": len(ds.images),
+        "current_image": {
             "id": image_id,
             "filename": img["filename"],
             "url": f"/media/{ds.id}/{img['rel']}",
+            "width": img["width"],
+            "height": img["height"],
             "approved": image_id in ds.rep["approved"],
         },
-        "approved_count": len(ds.rep["approved"]),
-        "target_n": ds.rep["n"],
+        "can_go_prev": ds.rep["index"] > 0,
+        "can_go_next": (
+            len(ds.rep["approved"]) < ds.rep["n"]
+            and ds.rep["index"] < len(ds.rep["pool"]) - 1
+        ),
+        "completed": len(ds.rep["approved"]) >= ds.rep["n"],
     }
 
 
@@ -258,7 +287,7 @@ def run_autolabel(ds):
 
     if total == 0:
         with ds.lock:
-            ds.autolabel["status"] = "done"
+            ds.autolabel["status"] = "completed"
         return
 
     for i, img in enumerate(ds.images):
@@ -274,7 +303,7 @@ def run_autolabel(ds):
                 )
 
     with ds.lock:
-        ds.autolabel["status"] = "done"
+        ds.autolabel["status"] = "completed"
 
 
 def build_export_zip(ds, fmt):
@@ -371,24 +400,39 @@ def h_upload(handler, m, body):
         ds = build_dataset_from_zip(data)
     except zipfile.BadZipFile:
         return 400, {"detail": "Файл повреждён или не является zip-архивом"}
-    return 200, {"id": ds.id, "image_count": len(ds.images), "status": "ready"}
+    return 201, {
+        "status": "OK",
+        "dataset": {
+            "id": ds.id,
+            "image_count": len(ds.images),
+            "status": "READY",
+        },
+    }
 
 
 @route_get(r"^/api/datasets/(?P<id>[\w-]+)/stats$")
 def h_stats(handler, m, body):
     ds = require_dataset(m.group("id"))
-    return 200, compute_stats(ds)
+    stats = compute_stats(ds)
+    warnings = stats.pop("warnings")
+    return 200, {
+        "dataset_id": ds.id,
+        "stats": stats,
+        "warnings": warnings,
+        "images": ds.images,
+    }
 
 
 @route_post(r"^/api/datasets/(?P<id>[\w-]+)/representative/init$")
 def h_rep_init(handler, m, body):
     ds = require_dataset(m.group("id"))
     payload = json.loads(body or b"{}")
-    n = max(1, int(payload.get("n", 8)))
+    n = max(1, int(payload.get("target_count", 8)))
     n = min(n, len(ds.images)) if ds.images else 0
-    pool = [img["id"] for img in ds.images[:n]] if n else []
+    pool = [img["id"] for img in ds.images] if n else []
+    approved = set(pool) if len(pool) <= n else set()
     with ds.lock:
-        ds.rep = {"n": n, "pool": pool, "index": 0, "approved": set()}
+        ds.rep = {"n": n, "pool": pool, "index": 0, "approved": approved}
     return 200, frame_response(ds)
 
 
@@ -510,7 +554,9 @@ def h_autolabel_status(handler, m, body):
     with ds.lock:
         return 200, {
             "status": ds.autolabel["status"],
-            "progress": dict(ds.autolabel["progress"]),
+            "total_images": ds.autolabel["progress"]["total"],
+            "processed_images": ds.autolabel["progress"]["done"],
+            "failed_images": len(ds.autolabel["errors"]),
             "errors": list(ds.autolabel["errors"]),
         }
 
@@ -529,13 +575,11 @@ def h_cvat_export(handler, m, body):
     payload = json.loads(body or b"{}")
     fmt = payload.get("format", "yolo")
     path = build_export_zip(ds, fmt)
-    return 200, {"status": "ok", "path": path}
-
-
-@route_post(r"^/api/datasets/(?P<id>[\w-]+)/cvat/import$")
-def h_cvat_import(handler, m, body):
-    ds = require_dataset(m.group("id"))
-    return 200, {"status": "ok", "task_url": "http://localhost:8080/tasks/1 (mock)"}
+    return 200, {
+        "status": "OK",
+        "format": fmt,
+        "archive_url": path,
+    }
 
 
 @route_get(r"^/api/datasets/(?P<id>[\w-]+)/results$")
@@ -551,7 +595,15 @@ def h_results(handler, m, body):
     return 200, {
         "annotations_url": f"/media/{ds.id}/results/annotations.json",
         "errors_url": f"/media/{ds.id}/results/errors.json",
-        "cvat_export": {fmt: f"/media/{ds.id}/{p}" for fmt, p in ds.exports.items()},
+        "cvat_export": (
+            {
+                "status": "ready",
+                "format": "yolo",
+                "archive_url": f"/media/{ds.id}/{ds.exports['yolo']}",
+            }
+            if "yolo" in ds.exports
+            else {"status": "not_created"}
+        ),
         "previews": previews,
         "errors": ds.autolabel["errors"],
     }

@@ -135,8 +135,6 @@
                 <label for="dartMode">Режим</label>
                 <select id="dartMode">
                   <option value="bbox">bbox</option>
-                  <option value="mask">mask</option>
-                  <option value="bbox_and_mask">bbox + mask</option>
                 </select>
               </div>
               <div class="field" style="flex-direction:row; align-items:center; gap:8px;">
@@ -162,7 +160,7 @@
 
           <div class="footer-nav">
             <button class="btn" id="backToSelect">← Назад</button>
-            <button class="btn btn-primary" id="toAutolabel">Далее: авторазметка →</button>
+            <button class="btn btn-primary" id="toAutolabel" disabled>Далее: авторазметка →</button>
           </div>
         </section>
 
@@ -199,7 +197,7 @@
           <div class="screen-head">
             <span class="eyebrow">Шаг 6 / 7</span>
             <h2>Экспорт в CVAT</h2>
-            <p>Подготовьте машинно-читаемую разметку в формате CVAT и импортируйте исходные изображения вместе с аннотациями.</p>
+            <p>Подготовьте YOLO-архив и импортируйте его вручную в локальный CVAT.</p>
           </div>
 
           <div class="card">
@@ -207,12 +205,11 @@
               <label for="exportFormat">Формат экспорта</label>
               <select id="exportFormat">
                 <option value="yolo">YOLO (bbox)</option>
-                <option value="coco">COCO (segmentation)</option>
               </select>
             </div>
             <div class="btn-row">
               <button class="btn btn-accent" id="exportBuild">Подготовить экспорт</button>
-              <button class="btn btn-primary" id="exportImport" disabled>Импортировать в CVAT</button>
+              <button class="btn btn-primary" id="exportImport" disabled>Открыть CVAT для ручного импорта</button>
             </div>
             <div id="exportStatus" style="margin-top:14px;"></div>
           </div>
