@@ -25,7 +25,7 @@ async function apiFetch(path, opts = {}) {
     let msg = `HTTP ${res.status}`;
     try {
       const data = await res.json();
-      if (data && data.detail) msg = data.detail;
+      msg = getApiErrorMessage(data, msg);
     } catch (_) {
       /* noop */
     }
@@ -34,6 +34,13 @@ async function apiFetch(path, opts = {}) {
   if (res.status === 204) return null;
   const text = await res.text();
   return text ? JSON.parse(text) : null;
+}
+
+function getApiErrorMessage(data, fallback) {
+  if (data?.error?.message) return data.error.message;
+  if (typeof data?.detail === "string") return data.detail;
+  if (data?.detail?.message) return data.detail.message;
+  return fallback;
 }
 
 function apiPostJSON(path, body) {
@@ -212,7 +219,7 @@ function uploadZip(file) {
       let msg = `HTTP ${xhr.status}`;
       try {
         const data = JSON.parse(xhr.responseText);
-        if (data.detail) msg = data.detail;
+        msg = getApiErrorMessage(data, msg);
       } catch (_) {
         /* noop */
       }
@@ -226,8 +233,9 @@ function uploadZip(file) {
     } catch (_) {
       /* noop */
     }
-    state.datasetId = data.id || data.dataset_id;
-    text.textContent = `Готово: ${data.image_count ?? "?"} изображений`;
+    const dataset = data.dataset || data;
+    state.datasetId = dataset.id || data.dataset_id;
+    text.textContent = `Готово: ${dataset.image_count ?? "?"} изображений`;
     bar.style.width = "100%";
     unlock("stats");
     el("toStats").disabled = false;
@@ -247,8 +255,11 @@ async function loadStats() {
   const body = el("statsBody");
   showEmpty(body, "Загружаем статистику…");
   try {
-    const stats = await apiFetch(`${API}/${state.datasetId}/stats`);
-    renderStats(stats);
+    const response = await apiFetch(`${API}/${state.datasetId}/stats`);
+    renderStats({
+      ...(response.stats || response),
+      warnings: response.warnings || response.stats?.warnings || [],
+    });
     unlock("select");
     el("toSelect").disabled = false;
     renderRail();
@@ -267,20 +278,20 @@ function renderStats(stats) {
   const tiles = [
     { num: stats.image_count ?? "—", label: "изображений" },
     {
-      num: stats.min_resolution
-        ? `${stats.min_resolution.width}×${stats.min_resolution.height}`
+      num: stats.min_size
+        ? `${stats.min_size.width}×${stats.min_size.height}`
         : "—",
       label: "мин. разрешение",
     },
     {
-      num: stats.max_resolution
-        ? `${stats.max_resolution.width}×${stats.max_resolution.height}`
+      num: stats.max_size
+        ? `${stats.max_size.width}×${stats.max_size.height}`
         : "—",
       label: "макс. разрешение",
     },
     {
-      num: stats.common_resolution
-        ? `${stats.common_resolution.width}×${stats.common_resolution.height}`
+      num: stats.common_resolutions?.[0]?.resolution
+        ? stats.common_resolutions[0].resolution
         : "—",
       label: "частое разрешение",
     },
@@ -334,7 +345,9 @@ async function repInit() {
   const n = parseInt(el("repN").value, 10) || 1;
   el("approvedTarget").textContent = n;
   try {
-    await apiPostJSON(`${API}/${state.datasetId}/representative/init`, { n });
+    await apiPostJSON(`${API}/${state.datasetId}/representative/init`, {
+      target_count: n,
+    });
     el("repCard").hidden = false;
     await refreshCurrentFrame();
   } catch (e) {
@@ -354,7 +367,7 @@ async function refreshCurrentFrame() {
 }
 
 function renderFrame(data) {
-  const img = data.image || {};
+  const img = data.current_image || data.image || {};
   const imageEl = el("frameImage");
   const placeholder = el("framePlaceholder");
   const safeSrc = safeHttpUrl(img.url);
@@ -388,9 +401,11 @@ function renderFrame(data) {
   }
 
   el("approvedCount").textContent = data.approved_count ?? state.approvedImages.length;
-  if (data.target_n) el("approvedTarget").textContent = data.target_n;
+  if (data.target_count) el("approvedTarget").textContent = data.target_count;
 
   state.currentFrameId = img.id;
+  el("framePrev").disabled = !data.can_go_prev;
+  el("frameNext").disabled = !data.can_go_next;
 
   const approvedCount = data.approved_count ?? 0;
   el("toDart").disabled = approvedCount < 1;
