@@ -20,6 +20,7 @@ workspace/*
 !workspace/.gitkeep
 samples/*
 !samples/.gitkeep
+!samples/README.md
 
 # Model weights and large local artifacts
 models/
